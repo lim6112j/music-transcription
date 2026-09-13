@@ -1,5 +1,6 @@
 import { BasicPitch } from '@spotify/basic-pitch';
 import { addPitchBendsToNoteEvents, noteFramesToTime, outputToNotesPoly } from '@spotify/basic-pitch';
+import { ensureTfBackend } from './tfBackend';
 
 export interface NoteEvent {
   pitchMidi: number;
@@ -27,6 +28,9 @@ export async function transcribeAudio(
   buffer: AudioBuffer,
   onProgress: (percent: number) => void,
 ): Promise<NoteEvent[]> {
+  // validate the GPU can actually run TF shaders before loading the model;
+  // falls back to CPU on machines where WebGL shader compilation fails
+  await ensureTfBackend();
   const basicPitch = new BasicPitch(modelPath);
   // evaluateModel emits one callback per audio batch — accumulate all matrices
   // and extract notes once at the end so notes spanning batch boundaries merge.
