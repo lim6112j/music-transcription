@@ -39,7 +39,7 @@ const EPS = 1e-6;
 const MAX_MEASURES = 400;
 const MAX_VOICES = 2; // single-stave engraving limit; excess layers clip instead of stack
 
-function beatsOf(duration: string): number {
+export function beatsOf(duration: string): number {
   const base = duration.replace('r', '');
   const found = DUR_BEATS.find(([, code]) => code === base);
   return found ? found[0] : 0;
@@ -333,7 +333,7 @@ function makeItems(
   });
 }
 
-function keysToMidi(key: string): number {
+export function keysToMidi(key: string): number {
   // reverse of midiToKeySpec
   const [name, oct] = key.split('/');
   const base = BASE_PC[name[0]] ?? 0;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { decodeAudioFile, MicRecorder } from './audio/audioInput';
+import { playScore, type PlaybackHandle } from './audio/playback';
 import { transcribeAudio, type NoteEvent } from './transcribe/transcribe';
 import { filterNoiseEvents, type NoiseFilterLevel } from './transcribe/filter';
 import {
@@ -42,9 +43,12 @@ export default function App() {
   const [keySpec, setKeySpec] = useState('C');
   const [noiseFilter, setNoiseFilter] = useState<NoiseFilterLevel>('medium');
   const [exporting, setExporting] = useState(false);
+  const [playback, setPlayback] = useState<PlaybackHandle | null>(null);
+  const [playingMeasure, setPlayingMeasure] = useState<number | null>(null);
 
   const recorderRef = useRef<MicRecorder | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const playbackRef = useRef<PlaybackHandle | null>(null);
 
   // keep raw events so changing the filter level re-derives without re-transcribing
   const filteredEvents = useMemo(
@@ -58,6 +62,17 @@ export default function App() {
   }, [filteredEvents, tempo, beatsPerMeasure, clef, keySpec]);
 
   const busy = status === 'decoding' || status === 'analyzing';
+
+  // stop playback if the score disappears (e.g. filter change) or on unmount
+  useEffect(() => {
+    if (!score) {
+      playbackRef.current?.stop();
+      playbackRef.current = null;
+      setPlayback(null);
+      setPlayingMeasure(null);
+    }
+  }, [score]);
+  useEffect(() => () => playbackRef.current?.stop(), []);
 
   useEffect(() => {
     if (!recording) return;
@@ -146,6 +161,33 @@ export default function App() {
 
   const handlePrint = useCallback(() => window.print(), []);
 
+  const stopPlayback = useCallback(() => {
+    playbackRef.current?.stop();
+    playbackRef.current = null;
+    setPlayback(null);
+    setPlayingMeasure(null);
+  }, []);
+
+  const handleTogglePlayback = useCallback(() => {
+    if (playbackRef.current) {
+      stopPlayback();
+      return;
+    }
+    if (!score) return;
+    const handle = playScore(score, (measure) => {
+      if (measure < 0) {
+        // finished or stopped — reset the transport
+        playbackRef.current = null;
+        setPlayback(null);
+        setPlayingMeasure(null);
+      } else {
+        setPlayingMeasure(measure);
+      }
+    });
+    playbackRef.current = handle;
+    setPlayback(handle);
+  }, [score, stopPlayback]);
+
   const handleExportPdf = useCallback(async () => {
     const el = document.getElementById(SCORE_SHEET_ID);
     if (!el || exporting) return;
@@ -180,6 +222,9 @@ export default function App() {
           </div>
         </div>
         <div className="header-actions">
+          <button className="btn" onClick={handleTogglePlayback} disabled={!score || busy}>
+            {playback ? '■ Stop' : '▶ Play'}
+          </button>
           <button className="btn" onClick={handlePrint} disabled={!score}>
             Print
           </button>
@@ -320,7 +365,16 @@ export default function App() {
               <p className="hint">Polyphonic transcription runs entirely in your browser.</p>
             </div>
           )}
-          {!statusLabel && score && <ScoreView score={score} />}
+          {!statusLabel && score && (
+            <>
+              {playingMeasure !== null && (
+                <p className="hint playback-status" role="status">
+                  Playing — measure {playingMeasure + 1} of {score.totalMeasures}
+                </p>
+              )}
+              <ScoreView score={score} />
+            </>
+          )}
           {!statusLabel && !score && (
             <div className="empty-state">
               <div className="empty-art">𝄞</div>
