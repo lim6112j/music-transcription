@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { decodeAudioFile, MicRecorder } from './audio/audioInput';
+import {
+  fetchYouTubeAudio,
+  isYouTubeUrl,
+  loadCobaltApiKey,
+  loadCobaltEndpoint,
+  saveCobaltApiKey,
+  saveCobaltEndpoint,
+} from './audio/youtube';
 import { playScore, type PlaybackHandle } from './audio/playback';
 import { transcribeAudio, type NoteEvent } from './transcribe/transcribe';
 import { filterNoiseEvents, type NoiseFilterLevel } from './transcribe/filter';
@@ -14,7 +22,7 @@ import {
 import { ScoreView, SCORE_SHEET_ID } from './render/ScoreView';
 import { exportScorePdf } from './render/exportPdf';
 
-type Status = 'idle' | 'decoding' | 'analyzing' | 'ready';
+type Status = 'idle' | 'fetching' | 'decoding' | 'analyzing' | 'ready';
 
 const KEY_OPTIONS = [
   'C', 'G', 'D', 'A', 'E', 'B', 'F#',
@@ -45,6 +53,9 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [playback, setPlayback] = useState<PlaybackHandle | null>(null);
   const [playingMeasure, setPlayingMeasure] = useState<number | null>(null);
+  const [ytUrl, setYtUrl] = useState('');
+  const [cobaltEndpoint, setCobaltEndpoint] = useState(() => loadCobaltEndpoint());
+  const [cobaltApiKey, setCobaltApiKey] = useState(() => loadCobaltApiKey());
 
   const recorderRef = useRef<MicRecorder | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -61,7 +72,7 @@ export default function App() {
     return buildScore(filteredEvents, { tempo, beatsPerMeasure, clef, keySpec });
   }, [filteredEvents, tempo, beatsPerMeasure, clef, keySpec]);
 
-  const busy = status === 'decoding' || status === 'analyzing';
+  const busy = status === 'fetching' || status === 'decoding' || status === 'analyzing';
 
   // stop playback if the score disappears (e.g. filter change) or on unmount
   useEffect(() => {
@@ -159,6 +170,27 @@ export default function App() {
     }
   }, [recording, runTranscription]);
 
+  const handleYouTubeFetch = useCallback(async () => {
+    if (busy || recording) return;
+    if (!isYouTubeUrl(ytUrl)) {
+      setError('That does not look like a YouTube URL.');
+      return;
+    }
+    setError(null);
+    setStatus('fetching');
+    try {
+      const { file, sourceName } = await fetchYouTubeAudio(ytUrl, cobaltEndpoint);
+      saveCobaltEndpoint(cobaltEndpoint);
+      saveCobaltApiKey(cobaltApiKey);
+      const buffer = await decodeAudioFile(file);
+      await runTranscription(buffer, sourceName);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'Could not fetch audio from that URL.');
+      setStatus('idle');
+    }
+  }, [busy, recording, ytUrl, cobaltEndpoint, cobaltApiKey, runTranscription]);
+
   const handlePrint = useCallback(() => window.print(), []);
 
   const stopPlayback = useCallback(() => {
@@ -203,13 +235,15 @@ export default function App() {
   }, [fileName, exporting]);
 
   const statusLabel =
-    status === 'decoding'
-      ? 'Decoding audio…'
-      : status === 'analyzing'
-        ? progress < 1
-          ? 'Loading transcription model…'
-          : `Analyzing audio… ${Math.round(progress)}%`
-        : null;
+    status === 'fetching'
+      ? 'Fetching audio from YouTube…'
+      : status === 'decoding'
+        ? 'Decoding audio…'
+        : status === 'analyzing'
+          ? progress < 1
+            ? 'Loading transcription model…'
+            : `Analyzing audio… ${Math.round(progress)}%`
+          : null;
 
   return (
     <div className="app">
@@ -279,6 +313,52 @@ export default function App() {
                 }}
               />
             </div>
+            <div className="divider">or</div>
+            <div className="yt-row">
+              <input
+                className="yt-input"
+                type="url"
+                placeholder="Paste a YouTube URL"
+                value={ytUrl}
+                onChange={(e) => setYtUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleYouTubeFetch();
+                }}
+                disabled={busy || recording}
+              />
+              <button
+                className="btn"
+                onClick={() => void handleYouTubeFetch()}
+                disabled={busy || recording || ytUrl.trim() === ''}
+              >
+                ⇪ Fetch
+              </button>
+            </div>
+            <details className="yt-advanced">
+              <summary>Cobalt instance settings</summary>
+              <label className="field">
+                <span>Instance URL</span>
+                <input
+                  type="url"
+                  value={cobaltEndpoint}
+                  onChange={(e) => setCobaltEndpoint(e.target.value)}
+                  placeholder="https://api.cobalt.tools"
+                />
+              </label>
+              <label className="field">
+                <span>API key (optional)</span>
+                <input
+                  type="password"
+                  value={cobaltApiKey}
+                  onChange={(e) => setCobaltApiKey(e.target.value)}
+                  placeholder="Api-Key for instances that require one"
+                />
+              </label>
+            </details>
+            <p className="hint">
+              YouTube audio is resolved via a cobalt API instance — only download content you have
+              the right to use.
+            </p>
             <div className="divider">or</div>
             <button className={`btn record${recording ? ' active' : ''}`} onClick={() => void toggleRecording()}>
               {recording ? (

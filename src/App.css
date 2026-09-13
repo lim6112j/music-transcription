@@ -204,6 +204,52 @@
   display: block;
 }
 
+.yt-row {
+  display: flex;
+  gap: 8px;
+}
+
+.yt-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #d8d2e3;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #241f2e;
+  background: #fff;
+}
+
+.yt-input:focus {
+  outline: 2px solid #7c5cbf;
+  outline-offset: -1px;
+}
+
+.yt-advanced {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #6b6375;
+}
+
+.yt-advanced summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.yt-advanced .field {
+  margin-top: 8px;
+}
+
+.yt-advanced input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d8d2e3;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #241f2e;
+  background: #fff;
+}
+
 .divider {
   text-align: center;
   color: #8a8199;

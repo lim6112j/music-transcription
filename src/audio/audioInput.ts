@@ -23,10 +23,13 @@ export function truncateBuffer(buffer: AudioBuffer, maxSeconds: number): AudioBu
   return out;
 }
 
-export async function decodeAudioFile(file: File): Promise<AudioBuffer> {
-  const data = await file.arrayBuffer();
+export async function decodeArrayBuffer(data: ArrayBuffer): Promise<AudioBuffer> {
   const buffer = await getAudioContext().decodeAudioData(data);
   return truncateBuffer(buffer, MAX_AUDIO_SECONDS);
+}
+
+export async function decodeAudioFile(file: File): Promise<AudioBuffer> {
+  return decodeArrayBuffer(await file.arrayBuffer());
 }
 
 export class MicRecorder {
@@ -56,8 +59,6 @@ export class MicRecorder {
     this.recorder = null;
     this.stream = null;
     if (blob.size === 0) throw new Error('Recording was empty');
-    const data = await blob.arrayBuffer();
-    const buffer = await getAudioContext().decodeAudioData(data);
-    return truncateBuffer(buffer, MAX_AUDIO_SECONDS);
+    return decodeArrayBuffer(await blob.arrayBuffer());
   }
 }
