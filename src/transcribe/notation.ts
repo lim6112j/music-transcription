@@ -193,6 +193,28 @@ export function detectClef(events: NoteEvent[]): 'treble' | 'bass' {
   return median < 58 ? 'bass' : 'treble';
 }
 
+// ---------- Score layout ----------
+
+// item counts (notes+rests) per measure above which a row carries fewer
+// measures, so dense music keeps human-readable spacing
+const DENSE_MAX = 16;
+const DENSE_AVG = 12;
+const MEDIUM_MAX = 9;
+const MEDIUM_AVG = 6;
+
+/**
+ * Pick how many measures to draw per staff row: light scores fit 4 across,
+ * dense ones drop to 2 so notes don't cram together.
+ */
+export function pickMeasuresPerRow(itemCounts: number[]): number {
+  if (itemCounts.length === 0) return 4;
+  const max = Math.max(...itemCounts);
+  const avg = itemCounts.reduce((a, b) => a + b, 0) / itemCounts.length;
+  if (max > DENSE_MAX || avg > DENSE_AVG) return 2;
+  if (max > MEDIUM_MAX || avg > MEDIUM_AVG) return 3;
+  return 4;
+}
+
 // ---------- Pitch / key signature helpers ----------
 
 const PITCH_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];

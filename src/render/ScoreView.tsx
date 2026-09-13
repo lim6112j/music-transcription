@@ -11,12 +11,12 @@ import {
   Voice,
 } from 'vexflow';
 import type { BuiltScore, MeasureItem } from '../transcribe/notation';
+import { pickMeasuresPerRow } from '../transcribe/notation';
 
-const MEASURES_PER_ROW = 4;
 const STAVE_WIDTH = 1050;
-const ROW_HEIGHT = 160;
+const BASE_ROW_HEIGHT = 160;
+const MULTI_VOICE_ROW_HEIGHT = 210;
 const SVG_WIDTH = STAVE_WIDTH + 20;
-const SVG_HEIGHT = ROW_HEIGHT + 20;
 
 export const SCORE_SHEET_ID = 'score-sheet';
 
@@ -39,18 +39,23 @@ export function ScoreView({ score }: { score: BuiltScore }) {
 
       const { measures, settings } = score;
       const clef = settings.clef === 'auto' ? 'treble' : settings.clef;
-      const rows = chunk(measures, MEASURES_PER_ROW);
+      // fewer measures per row when the music is dense, so spacing stays readable
+      const measuresPerRow = pickMeasuresPerRow(measures.map((m) => m.length));
+      const rows = chunk(measures, measuresPerRow);
 
       rows.forEach((rowMeasures, rowIndex) => {
         const rowDiv = document.createElement('div');
         rowDiv.className = 'score-row';
         container.appendChild(rowDiv);
 
+        // multi-voice rows need vertical room for separated stems
+        const rowMultiVoice = rowMeasures.some((items) => items.some((i) => i.voice > 0));
+        const svgHeight = (rowMultiVoice ? MULTI_VOICE_ROW_HEIGHT : BASE_ROW_HEIGHT) + 20;
         const renderer = new Renderer(rowDiv, Renderer.Backends.SVG);
-        renderer.resize(SVG_WIDTH, SVG_HEIGHT);
+        renderer.resize(SVG_WIDTH, svgHeight);
         const ctx = renderer.getContext();
         const staveW = STAVE_WIDTH / rowMeasures.length;
-        const firstMeasureAbsolute = rowIndex * MEASURES_PER_ROW;
+        const firstMeasureAbsolute = rowIndex * measuresPerRow;
         const tieFromByVoice = new Map<number, StaveNote[]>();
 
         rowMeasures.forEach((items, col) => {

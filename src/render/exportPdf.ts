@@ -49,23 +49,29 @@ function convertTextsToPaths(svg: SVGSVGElement, fonts: { bravura: Font; academi
       else runs.push({ chars: ch, font });
     }
 
-    // measure total advance for anchoring
-    const totalWidth = runs.reduce((w, r) => w + r.font.getAdvanceWidth(r.chars, px), 0);
-    let cursor = x;
-    if (anchor === 'middle') cursor = x - totalWidth / 2;
-    else if (anchor === 'end') cursor = x - totalWidth;
+    // measure total advance for anchoring; some glyphs report non-finite
+    // metrics, which would poison the path data with NaN
+    const advanceOf = (r: Run) => {
+      const w = r.font.getAdvanceWidth(r.chars, px);
+      return Number.isFinite(w) ? w : 0;
+    };
+    const totalWidth = runs.reduce((w, r) => w + advanceOf(r), 0);
+    let cursor = Number.isFinite(x) ? x : 0;
+    if (anchor === 'middle') cursor -= totalWidth / 2;
+    else if (anchor === 'end') cursor -= totalWidth;
+    const yPos = Number.isFinite(y) ? y : 0;
 
     const g = document.createElementNS(SVG_NS, 'g');
     for (const run of runs) {
-      const pathData = run.font.getPath(run.chars, cursor, y, px).toPathData(3);
-      if (pathData) {
+      const pathData = run.font.getPath(run.chars, cursor, yPos, px).toPathData(3);
+      if (pathData && !pathData.includes('NaN')) {
         const path = document.createElementNS(SVG_NS, 'path');
         path.setAttribute('d', pathData);
         path.setAttribute('fill', fill);
         path.setAttribute('stroke', 'none');
         g.appendChild(path);
       }
-      cursor += run.font.getAdvanceWidth(run.chars, px);
+      cursor += advanceOf(run);
     }
     t.replaceWith(g);
   });
