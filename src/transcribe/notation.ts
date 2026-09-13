@@ -4,6 +4,7 @@ export interface MeasureItem {
   keys: string[]; // VexFlow pitch specs, e.g. ['c/4', 'e/4']
   duration: string; // VexFlow duration code incl. rests, e.g. 'q', 'hd', 'qr'
   isRest: boolean;
+  voice: number; // voice layer this item belongs to (0 = primary)
   accidentals: Array<string | null>; // per-key accidental symbol or null
   tieToNext: boolean;
   tieFromPrev: boolean;
@@ -78,7 +79,6 @@ export function estimateTempo(events: NoteEvent[]): number {
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 const PC_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
-const MINOR_SPECS = ['Am', 'Bm', 'Cm', 'C#m', 'Dm', 'D#m', 'Em', 'Fm', 'F#m', 'Gm', 'G#m', 'Am'];
 
 function correlation(a: number[], b: number[]): number {
   const n = a.length;
@@ -117,7 +117,9 @@ export function estimateKeySpec(events: NoteEvent[], tempo: number): string {
     }
     if (minorScore > bestScore) {
       bestScore = minorScore;
-      best = MINOR_SPECS[tonic];
+      // both profiles share the same tonic, so the minor result is the
+      // parallel minor (C tonic -> 'Cm'), not the relative minor
+      best = `${PC_NAMES[tonic]}m`;
     }
   }
   return best;
@@ -139,28 +141,50 @@ const BASE_PC: Record<string, number> = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b:
 const SHARP_ORDER = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
 const FLAT_ORDER = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
 
+// every key-name spelling the app can produce (KEY_OPTIONS + estimateKeySpec),
+// including enharmonics PC_NAMES lacks ('Db', 'G#')
+const PC_LOOKUP: Record<string, number> = {
+  C: 0,
+  'C#': 1,
+  Db: 1,
+  D: 2,
+  'D#': 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  'F#': 6,
+  Gb: 6,
+  G: 7,
+  'G#': 8,
+  Ab: 8,
+  A: 9,
+  'A#': 10,
+  Bb: 10,
+  B: 11,
+  Cb: 11,
+};
+
+// accidental count per major-key tonic pitch class
+const SHARPS_BY_PC: Record<number, number> = { 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: 7 };
+const FLATS_BY_PC: Record<number, number> = { 5: 1, 10: 2, 3: 3, 8: 4, 1: 5, 6: 6, 11: 7 };
+// major tonics whose standard spelling is flat and unambiguous (F, Bb, Eb, Ab)
+const FLAT_MAJORS = new Set([5, 10, 3, 8]);
+
 function keySignatureMap(keySpec: string): Record<string, '#' | 'b' | ''> {
   const map: Record<string, '#' | 'b' | ''> = { c: '', d: '', e: '', f: '', g: '', a: '', b: '' };
   const isMinor = keySpec.length > 1 && keySpec.endsWith('m');
   const root = isMinor ? keySpec.slice(0, -1) : keySpec;
-  const pc = PC_NAMES.indexOf(root);
-  if (pc < 0) return map;
-  if (isMinor) {
-    applyMajorKey(map, (pc + 3) % 12); // relative major
-  } else {
-    applyMajorKey(map, pc);
-  }
+  const pc = PC_LOOKUP[root];
+  if (pc === undefined) return map;
+  const majorPc = isMinor ? (pc + 3) % 12 : pc; // minor keys use their relative major's signature
+  // the root's own spelling decides between enharmonic key signatures
+  // (C# major = 7 sharps, Db major = 5 flats)
+  const preferFlats = root.includes('b') || (!root.includes('#') && FLAT_MAJORS.has(majorPc));
+  const count = preferFlats ? FLATS_BY_PC[majorPc] : (SHARPS_BY_PC[majorPc] ?? FLATS_BY_PC[majorPc]);
+  const order = preferFlats ? FLAT_ORDER : SHARP_ORDER;
+  const symbol: '#' | 'b' = preferFlats ? 'b' : '#';
+  for (let i = 0; i < (count ?? 0); i++) map[order[i]] = symbol;
   return map;
-}
-
-function applyMajorKey(map: Record<string, '#' | 'b' | ''>, majorPc: number): void {
-  if (majorPc >= 6) {
-    const flats = ({ 5: 1, 10: 2, 3: 3, 8: 4, 1: 5, 6: 6, 11: 7 } as Record<number, number>)[majorPc] ?? 0;
-    for (let i = 0; i < flats; i++) map[FLAT_ORDER[i]] = 'b';
-  } else {
-    const sharps = ({ 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: 7 } as Record<number, number>)[majorPc] ?? 0;
-    for (let i = 0; i < sharps; i++) map[SHARP_ORDER[i]] = '#';
-  }
 }
 
 function midiToKeySpec(midi: number): string {
@@ -233,7 +257,7 @@ function makeItems(
   keys: string[],
   isRest: boolean,
   keyMap: Record<string, '#' | 'b' | ''>,
-  tieChain: boolean,
+  voice: number,
 ): MeasureItem[] {
   return segments.map((seg, i) => {
     const dur = DUR_BEATS.find(([b]) => Math.abs(b - seg.beats) < EPS)?.[1] ?? 'q';
@@ -241,9 +265,11 @@ function makeItems(
       keys: isRest ? ['b/4'] : keys,
       duration: isRest ? `${dur}r` : dur,
       isRest,
+      voice,
       accidentals: isRest ? [] : keys.map((_, k) => accidentalFor(keysToMidi(keys[k]), keyMap)),
-      tieToNext: tieChain && i < segments.length - 1,
-      tieFromPrev: tieChain && i > 0,
+      // a chain longer than one segment means its parts are tied together
+      tieToNext: !isRest && i < segments.length - 1,
+      tieFromPrev: !isRest && i > 0,
     };
   });
 }
@@ -253,6 +279,26 @@ function keysToMidi(key: string): number {
   const [name, oct] = key.split('/');
   const base = BASE_PC[name[0]] ?? 0;
   return base + (name.length > 1 ? (name[1] === '#' ? 1 : -1) : 0) + (parseInt(oct, 10) + 1) * 12;
+}
+
+/**
+ * Build items for a whole segment chain and place each item into the measure
+ * its segment belongs to, so ties across measure boundaries stay intact.
+ */
+function appendItems(
+  measures: MeasureItem[][],
+  segments: Array<{ start: number; beats: number }>,
+  keys: string[],
+  isRest: boolean,
+  keyMap: Record<string, '#' | 'b' | ''>,
+  voice: number,
+  beatsPerMeasure: number,
+): void {
+  const items = makeItems(segments, keys, isRest, keyMap, voice);
+  segments.forEach((seg, i) => {
+    const mi = measureIndexOf(seg, beatsPerMeasure);
+    if (mi >= 0 && mi < measures.length) measures[mi].push(items[i]);
+  });
 }
 
 // ---------- Main builder ----------
@@ -283,58 +329,83 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
   }
   for (const g of groups) g.pitches.sort((a, b) => a - b);
 
-  // 3. Total measures needed
-  const lastEnd = groups.length > 0 ? groups[groups.length - 1].end : beatsPerMeasure;
+  // 3. Assign chord groups to voices so no voice ever overlaps itself;
+  // overlapping material (e.g. a held bass note under a melody) becomes
+  // additional voices instead of being dropped
+  const voiceEnds: number[] = [];
+  const voices: OnsetGroup[][] = [];
+  for (const g of groups) {
+    let vi = voiceEnds.findIndex((end) => end <= g.start + EPS);
+    if (vi < 0) {
+      vi = voiceEnds.length;
+      voiceEnds.push(0);
+      voices.push([]);
+    }
+    voices[vi].push(g);
+    voiceEnds[vi] = Math.max(voiceEnds[vi], g.end);
+  }
+  if (voices.length === 0) voices.push([]);
+
+  // 4. Total measures needed
+  const lastEnd = voices.reduce(
+    (max, gs) => (gs.length > 0 ? Math.max(max, gs[gs.length - 1].end) : max),
+    beatsPerMeasure,
+  );
   const totalMeasures = Math.min(MAX_MEASURES, Math.max(1, Math.ceil(lastEnd / beatsPerMeasure - EPS)));
 
-  // 4. Lay out chords and rests measure by measure
+  // 5. Lay out each voice measure by measure; gaps become rests
   const measures: MeasureItem[][] = Array.from({ length: totalMeasures }, () => []);
-  let cursor = 0;
-  for (const g of groups) {
-    if (g.start > cursor + EPS) {
-      const segs = splitIntoSegments(cursor, g.start - cursor, beatsPerMeasure);
-      for (const seg of segs) {
-        const mi = measureIndexOf(seg, beatsPerMeasure);
-        if (mi >= 0 && mi < totalMeasures) measures[mi].push(...makeItems([seg], [], true, keyMap, false));
+  voices.forEach((gs, voice) => {
+    let cursor = 0;
+    for (const g of gs) {
+      if (g.start > cursor + EPS) {
+        appendItems(
+          measures,
+          splitIntoSegments(cursor, g.start - cursor, beatsPerMeasure),
+          [],
+          true,
+          keyMap,
+          voice,
+          beatsPerMeasure,
+        );
+        cursor = g.start;
       }
-      cursor = g.start;
+      const keys = g.pitches.map(midiToKeySpec);
+      const noteLen = Math.max(QUANTUM, g.end - g.start);
+      const segs = splitIntoSegments(g.start, noteLen, beatsPerMeasure);
+      appendItems(measures, segs, keys, false, keyMap, voice, beatsPerMeasure);
+      const last = segs[segs.length - 1];
+      cursor = Math.max(cursor, last ? last.start + last.beats : g.start);
     }
-    if (g.start < cursor - EPS) continue; // leftover overlap, skip
-    const keys = g.pitches.map(midiToKeySpec);
-    const noteLen = Math.max(QUANTUM, g.end - g.start);
-    const segs = splitIntoSegments(g.start, noteLen, beatsPerMeasure);
-    for (const seg of segs) {
-      const mi = measureIndexOf(seg, beatsPerMeasure);
-      if (mi >= 0 && mi < totalMeasures) {
-        measures[mi].push(...makeItems([seg], keys, false, keyMap, segs.length > 1));
-      }
+    // trailing rest completes the final measure
+    const scoreEnd = totalMeasures * beatsPerMeasure;
+    if (cursor < scoreEnd - EPS) {
+      appendItems(
+        measures,
+        splitIntoSegments(cursor, scoreEnd - cursor, beatsPerMeasure),
+        [],
+        true,
+        keyMap,
+        voice,
+        beatsPerMeasure,
+      );
     }
-    const last = segs[segs.length - 1];
-    cursor = Math.max(cursor, last ? last.start + last.beats : g.start);
-  }
-  // trailing rest completes the final measure
-  const scoreEnd = totalMeasures * beatsPerMeasure;
-  if (cursor < scoreEnd - EPS) {
-    const segs = splitIntoSegments(cursor, scoreEnd - cursor, beatsPerMeasure);
-    for (const seg of segs) {
-      const mi = measureIndexOf(seg, beatsPerMeasure);
-      if (mi >= 0 && mi < totalMeasures) measures[mi].push(...makeItems([seg], [], true, keyMap, false));
-    }
-  }
+  });
 
-  // 5. Clamp overflow inside each measure (rounding safety)
-  for (const m of measures) {
-    let sum = 0;
-    for (const item of m) {
-      let beats = beatsOf(item.duration);
-      if (sum + beats > beatsPerMeasure + EPS) {
-        const remaining = Math.max(QUANTUM, beatsPerMeasure - sum);
-        const pick = pickDuration(remaining) ?? ([QUANTUM, '16'] as [number, string]);
-        item.duration = item.isRest ? `${pick[1]}r` : pick[1];
-        beats = beatsOf(item.duration);
+  // 6. Clamp overflow inside each measure per voice (rounding safety)
+  for (let mi = 0; mi < measures.length; mi++) {
+    const sums = new Map<number, number>();
+    measures[mi] = measures[mi].map((item) => {
+      const sum = sums.get(item.voice) ?? 0;
+      const beats = beatsOf(item.duration);
+      if (sum + beats <= beatsPerMeasure + EPS) {
+        sums.set(item.voice, sum + beats);
+        return item;
       }
-      sum += beats;
-    }
+      const [b, code] = pickDuration(Math.max(QUANTUM, beatsPerMeasure - sum)) ?? ([QUANTUM, '16'] as [number, string]);
+      sums.set(item.voice, sum + b);
+      return { ...item, duration: item.isRest ? `${code}r` : code };
+    });
   }
 
   return { measures, settings, totalMeasures };

@@ -84,7 +84,6 @@ export async function exportScorePdf(container: HTMLElement, fileName: string): 
   const usableW = pageW - margin * 2;
 
   let y = margin;
-  let firstOnPage = true;
   for (const src of svgs) {
     // work on a clone so the on-screen score keeps its webfont rendering
     const svg = src.cloneNode(true) as SVGSVGElement;
@@ -93,27 +92,29 @@ export async function exportScorePdf(container: HTMLElement, fileName: string): 
     const h = parseFloat(svg.getAttribute('height') ?? '0');
     if (!w || !h) continue;
     const drawH = (h / w) * usableW;
-    if (!firstOnPage && y + drawH > pageH - margin) {
+    if (y + drawH > pageH - margin) {
       doc.addPage();
       y = margin;
-      firstOnPage = true;
     }
+    // a row taller than the space left on the page is scaled down so it
+    // never clips (also covers a first row taller than a whole page)
+    const fitScale = Math.min(1, (pageH - margin - y) / drawH);
+    const drawW = usableW * fitScale;
     // svg2pdf requires the element to be attached to the DOM
     svg.style.position = 'absolute';
     svg.style.left = '-10000px';
     document.body.appendChild(svg);
     try {
       await (doc as unknown as { svg: (el: SVGElement, o: object) => Promise<void> }).svg(svg, {
-        x: margin,
+        x: margin + (usableW - drawW) / 2,
         y,
-        width: usableW,
-        height: drawH,
+        width: drawW,
+        height: drawH * fitScale,
       });
     } finally {
       svg.remove();
     }
-    y += drawH + 12;
-    firstOnPage = false;
+    y += drawH * fitScale + 12;
   }
   doc.save(fileName);
 }
