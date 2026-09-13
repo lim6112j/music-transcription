@@ -1,4 +1,6 @@
-export const DEFAULT_COBALT_ENDPOINT = 'https://api.cobalt.tools';
+// self-hosted instance (see README "Transcribing from a YouTube URL");
+// the official api.cobalt.tools is bot-protected and cannot serve YouTube
+export const DEFAULT_COBALT_ENDPOINT = 'http://localhost:4939';
 const ENDPOINT_STORAGE_KEY = 'staffscribe.cobaltEndpoint';
 const API_KEY_STORAGE_KEY = 'staffscribe.cobaltApiKey';
 
