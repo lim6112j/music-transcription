@@ -1,6 +1,7 @@
-// self-hosted instance (see README "Transcribing from a YouTube URL");
-// the official api.cobalt.tools is bot-protected and cannot serve YouTube
-export const DEFAULT_COBALT_ENDPOINT = 'http://localhost:4939';
+// self-hosted yt-dlp sidecar (see README "Transcribing from a YouTube URL");
+// it speaks cobalt's API shape. cobalt itself is blocked by YouTube's SABR
+// rollout for long-form videos (imputnet/cobalt#1455)
+export const DEFAULT_COBALT_ENDPOINT = 'http://localhost:4940';
 const ENDPOINT_STORAGE_KEY = 'staffscribe.cobaltEndpoint';
 const API_KEY_STORAGE_KEY = 'staffscribe.cobaltApiKey';
 
