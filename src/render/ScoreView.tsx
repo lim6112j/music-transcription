@@ -75,6 +75,23 @@ export function ScoreView({ score }: { score: BuiltScore }) {
           const voiceEntries = [...byVoice.entries()].sort((a, b) => a[0] - b[0]);
           const multiVoice = voiceEntries.length > 1;
 
+          // keyboard convention: the upper voice stems up, the lower stems
+          // down — decided per row by each voice's median pitch
+          const medianMidi = (voiceItems: MeasureItem[]): number => {
+            const pitches = voiceItems
+              .filter((it) => !it.isRest)
+              .flatMap((it) => it.keys.map(keyToMidi))
+              .sort((a, b) => a - b);
+            return pitches.length > 0 ? pitches[Math.floor(pitches.length / 2)] : -1;
+          };
+          const stemUpVoices = new Set<number>();
+          if (multiVoice) {
+            const sorted = [...voiceEntries].sort(
+              (a, b) => medianMidi(b[1]) - medianMidi(a[1]) || a[0] - b[0],
+            );
+            sorted.slice(0, Math.ceil(sorted.length / 2)).forEach(([vi]) => stemUpVoices.add(vi));
+          }
+
           const voices: Voice[] = [];
           const voiceNotes: StaveNote[][] = [];
           voiceEntries.forEach(([voiceIndex, voiceItems]) => {
@@ -83,10 +100,11 @@ export function ScoreView({ score }: { score: BuiltScore }) {
                 keys: item.keys,
                 duration: item.duration,
                 clef,
-                autoStem: multiVoice ? voiceIndex > 1 : !item.isRest,
+                autoStem: !multiVoice && !item.isRest,
               });
-              // keyboard convention: voice 1 stems up, voice 2 stems down
-              if (multiVoice && voiceIndex === 1) note.setStemDirection(Stem.DOWN);
+              if (multiVoice && !item.isRest) {
+                note.setStemDirection(stemUpVoices.has(voiceIndex) ? Stem.UP : Stem.DOWN);
+              }
               if (!item.isRest) {
                 item.accidentals.forEach((acc, i) => {
                   if (acc) note.addModifier(new Accidental(acc), i);
@@ -198,4 +216,14 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+// VexFlow key spec ('c#/4') -> MIDI note number, for voice ordering
+function keyToMidi(key: string): number {
+  const [name, oct] = key.split('/');
+  const base: Record<string, number> = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+  let midi = (base[name[0]] ?? 0) + (parseInt(oct ?? '4', 10) + 1) * 12;
+  if (name.includes('#')) midi += 1;
+  if (name.includes('b')) midi -= 1;
+  return midi;
 }

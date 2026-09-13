@@ -37,6 +37,7 @@ const DUR_BEATS: Array<[number, string]> = [
 const QUANTUM = 0.25; // sixteenth note
 const EPS = 1e-6;
 const MAX_MEASURES = 400;
+const MAX_VOICES = 2; // single-stave engraving limit; excess layers clip instead of stack
 
 function beatsOf(duration: string): number {
   const base = duration.replace('r', '');
@@ -329,17 +330,27 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
   }
   for (const g of groups) g.pitches.sort((a, b) => a - b);
 
-  // 3. Assign chord groups to voices so no voice ever overlaps itself;
-  // overlapping material (e.g. a held bass note under a melody) becomes
-  // additional voices instead of being dropped
+  // 3. Assign chord groups to voices so no voice ever overlaps itself.
+  // Overlapping material (e.g. a held bass note under a melody) becomes a
+  // second voice; a third layer clips the earliest-busy voice's tail
+  // instead of spawning an unreadable stack of voices on one stave.
   const voiceEnds: number[] = [];
   const voices: OnsetGroup[][] = [];
   for (const g of groups) {
     let vi = voiceEnds.findIndex((end) => end <= g.start + EPS);
     if (vi < 0) {
-      vi = voiceEnds.length;
-      voiceEnds.push(0);
-      voices.push([]);
+      if (voices.length < MAX_VOICES) {
+        vi = voiceEnds.length;
+        voiceEnds.push(0);
+        voices.push([]);
+      } else {
+        // both voices busy: reuse the one freeing up soonest, clipping the
+        // tail of the note that occupies it (invariant: only the last group
+        // in a voice can extend past g.start)
+        vi = voiceEnds.indexOf(Math.min(...voiceEnds));
+        const prev = voices[vi][voices[vi].length - 1];
+        if (prev && prev.end > g.start) prev.end = Math.max(prev.start + QUANTUM, g.start);
+      }
     }
     voices[vi].push(g);
     voiceEnds[vi] = Math.max(voiceEnds[vi], g.end);
