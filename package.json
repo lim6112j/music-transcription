@@ -17,6 +17,7 @@
     "opentype.js": "^2.0.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "smplr": "^1.0.0",
     "svg2pdf.js": "^2.8.1",
     "vexflow": "^5.0.0"
   },

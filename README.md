@@ -53,6 +53,10 @@ transcribed locally — the app itself stays fully client-side.
   If YouTube still refuses (fresh cloud IPs), pass your cookies via the
   instance's `COOKIE_PATH` setting.
 
+Score playback uses sampled grand-piano sounds, lazy-loaded from a public
+soundfont CDN on first Play (browser-cached afterwards). Offline it
+automatically falls back to a simple built-in synth.
+
 Only download content you have the right to use; downloading from YouTube
 is against their Terms of Service for content you don't own or have
 permission for.
