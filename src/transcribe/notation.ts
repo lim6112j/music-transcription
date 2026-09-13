@@ -54,25 +54,83 @@ function pickDuration(maxBeats: number): [number, string] | null {
 
 // ---------- Tempo estimation ----------
 
+const MIN_BPM = 70;
+const MAX_BPM = 180;
+const CENTER_BPM = 120;
+const DEFAULT_BPM = 120;
+// compare onsets up to this many apart, so skipped beats still contribute
+const MAX_PAIR_SPAN = 4;
+// IOIs outside this range are noise for pulse-finding purposes
+const MIN_IOI_SECONDS = 0.2;
+const MAX_IOI_SECONDS = 2.4;
+// below this peak-vote share the material has no clear pulse
+const MIN_TEMPO_CONFIDENCE = 0.12;
+
+/** All octave-equivalent tempi inside [MIN_BPM, MAX_BPM). */
+function octaveCandidates(bpm: number): number[] {
+  const kMin = Math.ceil(Math.log2(MIN_BPM / bpm));
+  const kMax = Math.floor(Math.log2(MAX_BPM / bpm));
+  const out: number[] = [];
+  for (let k = kMin; k <= kMax; k++) {
+    const candidate = bpm * 2 ** k;
+    if (candidate >= MIN_BPM && candidate < MAX_BPM) out.push(candidate);
+  }
+  return out;
+}
+
+/**
+ * Estimate tempo from inter-onset intervals: every onset pair votes for the
+ * tempo that would make their spacing a whole number of beats (weighted by
+ * closeness and note strength), then the strongest vote wins. Unlike a grid
+ * scan this cannot lock onto dotted-ratio degenerate solutions.
+ */
 export function estimateTempo(events: NoteEvent[]): number {
-  const onsets = Array.from(new Set(events.map((e) => e.startTimeSeconds))).sort((a, b) => a - b);
-  if (onsets.length < 4) return 120;
-  let bestBpm = 120;
-  let bestErr = Infinity;
-  for (let bpm = 70; bpm <= 180; bpm += 0.5) {
-    let err = 0;
-    for (const t of onsets) {
-      const beats = (t * bpm) / 60;
-      const frac = beats / QUANTUM;
-      err += Math.abs(frac - Math.round(frac));
-    }
-    err /= onsets.length;
-    if (err < bestErr - 1e-9) {
-      bestErr = err;
-      bestBpm = bpm;
+  // strongest amplitude per onset instant
+  const onsetAmp = new Map<number, number>();
+  for (const e of events) {
+    onsetAmp.set(e.startTimeSeconds, Math.max(onsetAmp.get(e.startTimeSeconds) ?? 0, e.amplitude));
+  }
+  const onsets = [...onsetAmp.keys()].sort((a, b) => a - b);
+  if (onsets.length < 4) return DEFAULT_BPM;
+
+  const votes = new Map<number, number>();
+  let totalVotes = 0;
+  for (let i = 0; i < onsets.length - 1; i++) {
+    for (let s = 1; s <= MAX_PAIR_SPAN && i + s < onsets.length; s++) {
+      const dt = onsets[i + s] - onsets[i];
+      if (dt < MIN_IOI_SECONDS || dt > MAX_IOI_SECONDS) continue;
+      const candidates = octaveCandidates(60 / dt);
+      if (candidates.length === 0) continue;
+      // the perceptually strongest octave is the one closest to the center
+      const bpm = candidates.reduce((best, c) =>
+        Math.abs(Math.log2(c / CENTER_BPM)) < Math.abs(Math.log2(best / CENTER_BPM)) ? c : best,
+      );
+      const amp = Math.min(onsetAmp.get(onsets[i])!, onsetAmp.get(onsets[i + s])!);
+      const weight = (1 / s) * (0.5 + 0.5 * amp);
+      votes.set(bpm, (votes.get(bpm) ?? 0) + weight);
+      totalVotes += weight;
     }
   }
-  return Math.round(bestBpm);
+  if (totalVotes === 0) return DEFAULT_BPM;
+
+  // smoothed score per 1-BPM bin, then a centroid refinement on the winner
+  const score = (bpm: number) =>
+    (votes.get(bpm - 1) ?? 0) + (votes.get(bpm) ?? 0) + (votes.get(bpm + 1) ?? 0);
+  let peak = 0;
+  let best = -Infinity;
+  for (const bpm of votes.keys()) {
+    const s = score(bpm);
+    if (s > best) {
+      best = s;
+      peak = bpm;
+    }
+  }
+  if (best / totalVotes < MIN_TEMPO_CONFIDENCE) return DEFAULT_BPM;
+
+  const window = [peak - 1, peak, peak + 1].map((b) => [b, votes.get(b) ?? 0] as const);
+  const wSum = window.reduce((n, [, w]) => n + w, 0);
+  if (wSum === 0) return peak;
+  return Math.round(window.reduce((n, [b, w]) => n + b * w, 0) / wSum);
 }
 
 // ---------- Key estimation (Krumhansl-Schmuckler) ----------

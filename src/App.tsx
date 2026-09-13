@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { decodeAudioFile, MicRecorder } from './audio/audioInput';
 import { transcribeAudio, type NoteEvent } from './transcribe/transcribe';
+import { filterNoiseEvents, type NoiseFilterLevel } from './transcribe/filter';
 import {
   buildScore,
   detectClef,
@@ -39,15 +40,22 @@ export default function App() {
   const [beatsPerMeasure, setBeatsPerMeasure] = useState(4);
   const [clef, setClef] = useState<'auto' | 'treble' | 'bass'>('auto');
   const [keySpec, setKeySpec] = useState('C');
+  const [noiseFilter, setNoiseFilter] = useState<NoiseFilterLevel>('medium');
   const [exporting, setExporting] = useState(false);
 
   const recorderRef = useRef<MicRecorder | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // keep raw events so changing the filter level re-derives without re-transcribing
+  const filteredEvents = useMemo(
+    () => (noteEvents ? filterNoiseEvents(noteEvents, noiseFilter) : null),
+    [noteEvents, noiseFilter],
+  );
+
   const score: BuiltScore | null = useMemo(() => {
-    if (!noteEvents) return null;
-    return buildScore(noteEvents, { tempo, beatsPerMeasure, clef, keySpec });
-  }, [noteEvents, tempo, beatsPerMeasure, clef, keySpec]);
+    if (!filteredEvents || filteredEvents.length === 0) return null;
+    return buildScore(filteredEvents, { tempo, beatsPerMeasure, clef, keySpec });
+  }, [filteredEvents, tempo, beatsPerMeasure, clef, keySpec]);
 
   const busy = status === 'decoding' || status === 'analyzing';
 
@@ -69,10 +77,18 @@ export default function App() {
         setStatus('idle');
         return;
       }
-      const detectedTempo = estimateTempo(events);
+      // detect on noise-filtered events so tempo/key/clef reflect actual notes,
+      // independent of the user's current filter level
+      const cleaned = filterNoiseEvents(events, 'medium');
+      if (cleaned.length === 0) {
+        setError('Only noise was detected in this audio. Try a clearer recording or another file.');
+        setStatus('idle');
+        return;
+      }
+      const detectedTempo = estimateTempo(cleaned);
       setTempo(detectedTempo);
-      setKeySpec(estimateKeySpec(events, detectedTempo));
-      setClef(detectClef(events));
+      setKeySpec(estimateKeySpec(cleaned, detectedTempo));
+      setClef(detectClef(cleaned));
       setFileName(name);
       setNoteEvents(events);
       setStatus('ready');
@@ -271,7 +287,23 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <p className="hint">Tempo, time signature and key are auto-detected when available.</p>
+            <label className="field">
+              <span>Noise filter</span>
+              <select
+                value={noiseFilter}
+                onChange={(e) => setNoiseFilter(e.target.value as NoiseFilterLevel)}
+              >
+                <option value="off">Off</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            {noteEvents && filteredEvents?.length === 0 ? (
+              <p className="hint">All detected notes were filtered out — lower the noise filter.</p>
+            ) : (
+              <p className="hint">Tempo, time signature and key are auto-detected when available.</p>
+            )}
           </section>
         </aside>
 
