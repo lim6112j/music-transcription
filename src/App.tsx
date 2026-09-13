@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { decodeAudioFile, MicRecorder } from './audio/audioInput';
+import { decodeAudioFile, MicRecorder, SystemAudioRecorder, type AudioRecorder } from './audio/audioInput';
 import {
   fetchYouTubeAudio,
   isYouTubeUrl,
@@ -57,7 +57,9 @@ export default function App() {
   const [cobaltEndpoint, setCobaltEndpoint] = useState(() => loadCobaltEndpoint());
   const [cobaltApiKey, setCobaltApiKey] = useState(() => loadCobaltApiKey());
 
-  const recorderRef = useRef<MicRecorder | null>(null);
+  const recorderRef = useRef<AudioRecorder | null>(null);
+  const recordingNameRef = useRef('Microphone recording');
+  const [recordingSource, setRecordingSource] = useState<'mic' | 'system' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const playbackRef = useRef<PlaybackHandle | null>(null);
 
@@ -142,33 +144,40 @@ export default function App() {
     [busy, recording, runTranscription],
   );
 
-  const toggleRecording = useCallback(async () => {
+  const toggleRecording = useCallback(
+    async (mode: 'mic' | 'system' = 'mic') => {
     if (recording) {
       const recorder = recorderRef.current;
       recorderRef.current = null;
       setRecording(false);
+      setRecordingSource(null);
       if (!recorder) return;
       try {
         setStatus('decoding');
         const buffer = await recorder.stop();
-        await runTranscription(buffer, 'Microphone recording');
+        await runTranscription(buffer, recordingNameRef.current);
       } catch (e) {
         console.error(e);
-        setError('Could not process the recording.');
+        setError(e instanceof Error ? e.message : 'Could not process the recording.');
         setStatus('idle');
       }
       return;
     }
     setError(null);
     try {
-      const recorder = new MicRecorder();
+      const recorder: AudioRecorder = mode === 'system' ? new SystemAudioRecorder() : new MicRecorder();
+      recordingNameRef.current = mode === 'system' ? 'System recording' : 'Microphone recording';
       await recorder.start();
       recorderRef.current = recorder;
+      setRecordingSource(mode);
       setRecording(true);
-    } catch {
-      setError('Microphone access was denied. Allow microphone access and try again.');
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : mode === 'system' ? 'Could not start system audio recording.' : 'Microphone access was denied. Allow microphone access and try again.');
     }
-  }, [recording, runTranscription]);
+    },
+    [recording, runTranscription],
+  );
 
   const handleYouTubeFetch = useCallback(async () => {
     if (busy || recording) return;
@@ -360,8 +369,30 @@ export default function App() {
               the right to use.
             </p>
             <div className="divider">or</div>
-            <button className={`btn record${recording ? ' active' : ''}`} onClick={() => void toggleRecording()}>
-              {recording ? (
+            <button
+              className={`btn record${recording ? ' active' : ''}`}
+              onClick={() => void toggleRecording('system')}
+              disabled={busy || (recording && recordingSource !== 'system')}
+            >
+              {recording && recordingSource === 'system' ? (
+                <>
+                  <span className="pulse-dot" /> Stop recording ({recordSeconds}s)
+                </>
+              ) : (
+                <>◉ Record system audio</>
+              )}
+            </button>
+            <p className="hint">
+              Pick Entire Screen and check "Share system audio" — requires Chrome 141+ on macOS
+              14.2+.
+            </p>
+            <div className="divider">or</div>
+            <button
+              className={`btn record${recording ? ' active' : ''}`}
+              onClick={() => void toggleRecording('mic')}
+              disabled={busy || (recording && recordingSource !== 'mic')}
+            >
+              {recording && recordingSource === 'mic' ? (
                 <>
                   <span className="pulse-dot" /> Stop recording ({recordSeconds}s)
                 </>

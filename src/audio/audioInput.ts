@@ -62,3 +62,71 @@ export class MicRecorder {
     return decodeArrayBuffer(await blob.arrayBuffer());
   }
 }
+
+/** Anything that can capture audio and hand back a decoded buffer. */
+export interface AudioRecorder {
+  start(): Promise<void>;
+  stop(): Promise<AudioBuffer>;
+}
+
+/** Records what the computer is playing, via screen-share with system audio. */
+export class SystemAudioRecorder implements AudioRecorder {
+  private recorder: MediaRecorder | null = null;
+  private chunks: Blob[] = [];
+  private stream: MediaStream | null = null;
+
+  async start(): Promise<void> {
+    let stream: MediaStream;
+    try {
+      // video is required by the share picker; we drop it right away and
+      // keep only the audio track
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: {
+          // clean loopback signal — no phone-style processing
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        systemAudio: 'include',
+        preferCurrentTab: false,
+        selfBrowserSurface: 'exclude',
+      } as DisplayMediaStreamOptions);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'NotAllowedError') {
+        throw new Error('Screen sharing was dismissed. Pick Entire Screen and allow sharing to record system audio.');
+      }
+      throw new Error('System audio recording is not supported in this browser. Use Chrome 141+ on macOS 14.2+, or upload a file / YouTube URL.');
+    }
+    const audioTracks = stream.getAudioTracks();
+    stream.getVideoTracks().forEach((t) => t.stop());
+    if (audioTracks.length === 0) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw new Error(
+        'No system audio was shared — pick Entire Screen and check "Share system audio" (Chrome 141+ on macOS 14.2+), or use the microphone.',
+      );
+    }
+    this.stream = new MediaStream(audioTracks);
+    this.chunks = [];
+    this.recorder = new MediaRecorder(this.stream);
+    this.recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) this.chunks.push(e.data);
+    };
+    this.recorder.start();
+  }
+
+  async stop(): Promise<AudioBuffer> {
+    if (!this.recorder) throw new Error('Not recording');
+    const done = new Promise<void>((resolve) => {
+      this.recorder!.onstop = () => resolve();
+    });
+    this.recorder.stop();
+    await done;
+    this.stream?.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(this.chunks, { type: this.recorder.mimeType });
+    this.recorder = null;
+    this.stream = null;
+    if (blob.size === 0) throw new Error('Recording was empty');
+    return decodeArrayBuffer(await blob.arrayBuffer());
+  }
+}

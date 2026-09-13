@@ -57,6 +57,15 @@ Score playback uses sampled grand-piano sounds, lazy-loaded from a public
 soundfont CDN on first Play (browser-cached afterwards). Offline it
 automatically falls back to a simple built-in synth.
 
+## Record system audio
+
+"Record system audio" captures what your computer is playing (Spotify,
+a local player, …) directly — no microphone noise. In the share picker,
+choose **Entire Screen** and check **Share system audio**. Requires
+Chrome 141+ on macOS 14.2+ (Apple's Core Audio taps); Safari does not
+support it — use file upload, the YouTube URL, or a virtual audio device
+such as BlackHole instead.
+
 Only download content you have the right to use; downloading from YouTube
 is against their Terms of Service for content you don't own or have
 permission for.
