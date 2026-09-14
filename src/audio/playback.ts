@@ -43,7 +43,8 @@ export function buildNoteSchedule(score: BuiltScore): ScheduledNote[] {
     for (const voiceItems of byVoice.values()) {
       let beat = mi * settings.beatsPerMeasure;
       for (const item of voiceItems) {
-        const beats = beatsOf(item.duration);
+        // tuplet items sound shorter than their nominal duration code
+        const beats = item.beats ?? beatsOf(item.duration);
         if (!item.isRest && item.keys.length > 0) {
           const prev = notes.length > 0 ? lastByVoice.get(item.voice) : undefined;
           const samePitch =

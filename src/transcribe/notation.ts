@@ -8,6 +8,8 @@ export interface MeasureItem {
   accidentals: Array<string | null>; // per-key accidental symbol or null
   tieToNext: boolean;
   tieFromPrev: boolean;
+  beats: number; // actual duration in beats (differs from nominal for tuplets)
+  tuplet: boolean; // part of a 3:2 tuplet group (render with a triplet bracket)
 }
 
 export interface ScoreSettings {
@@ -34,7 +36,16 @@ const DUR_BEATS: Array<[number, string]> = [
   [0.25, '16'],
 ];
 
-const QUANTUM = 0.25; // sixteenth note
+// triplet durations share the nominal code with their straight counterparts
+// but sound short: 3 of them fit where 2 straight notes would (3:2 tuplet)
+const TRIPLET_DUR_BEATS: Array<[number, string]> = [
+  [2 / 3, 'q'],
+  [1 / 3, '8'],
+  [1 / 6, '16'],
+];
+
+const QUANTUM = 1 / 12; // grid unit: 1/12 beat covers straight 16ths (3 units) and triplets (2/4 units)
+const CHORD_MERGE_BEATS = 0.125; // onsets closer than this merge into one chord
 const EPS = 1e-6;
 const MAX_MEASURES = 400;
 const MAX_VOICES = 2; // single-stave engraving limit; excess layers clip instead of stack
@@ -45,11 +56,40 @@ export function beatsOf(duration: string): number {
   return found ? found[0] : 0;
 }
 
-function pickDuration(maxBeats: number): [number, string] | null {
-  for (const [beats, code] of DUR_BEATS) {
-    if (beats <= maxBeats + EPS) return [beats, code];
-  }
+/** Straight duration exactly matching beats, if one exists. */
+function exactStraight(beats: number): [number, string] | null {
+  return DUR_BEATS.find(([b]) => Math.abs(b - beats) < EPS) ?? null;
+}
+
+/** Triplet duration exactly matching beats, if one exists. */
+function exactTriplet(beats: number): [number, string] | null {
+  return TRIPLET_DUR_BEATS.find(([b]) => Math.abs(b - beats) < EPS) ?? null;
+}
+
+interface DurationRep {
+  code: string; // VexFlow duration code (nominal)
+  beats: number; // actual beats sounded
+  tuplet: boolean;
+}
+
+function durationForBeats(beats: number): DurationRep | null {
+  const straight = exactStraight(beats);
+  if (straight) return { code: straight[1], beats: straight[0], tuplet: false };
+  const triplet = exactTriplet(beats);
+  if (triplet) return { code: triplet[1], beats: triplet[0], tuplet: true };
   return null;
+}
+
+function pickDuration(maxBeats: number): DurationRep | null {
+  // exact straight match first, then exact triplet (so triplet-shaped gaps
+  // fill exactly instead of leaving a 1/12-beat remainder), then largest fit
+  return (
+    durationForBeats(maxBeats) ??
+    (() => {
+      const fallback = DUR_BEATS.find(([b]) => b <= maxBeats + EPS);
+      return fallback ? { code: fallback[1], beats: fallback[0], tuplet: false } : null;
+    })()
+  );
 }
 
 // ---------- Tempo estimation ----------
@@ -315,10 +355,9 @@ function splitIntoSegments(
     }
     const pick = pickDuration(Math.min(remaining, cap));
     if (!pick) break;
-    const [beats] = pick;
-    segments.push({ start: pos, beats });
-    pos += beats;
-    remaining -= beats;
+    segments.push({ start: pos, beats: pick.beats });
+    pos += pick.beats;
+    remaining -= pick.beats;
   }
   return segments;
 }
@@ -341,16 +380,18 @@ function makeItems(
   voice: number,
 ): MeasureItem[] {
   return segments.map((seg, i) => {
-    const dur = DUR_BEATS.find(([b]) => Math.abs(b - seg.beats) < EPS)?.[1] ?? 'q';
+    const rep = durationForBeats(seg.beats) ?? { code: 'q', beats: 1, tuplet: false };
     return {
       keys: isRest ? ['b/4'] : keys,
-      duration: isRest ? `${dur}r` : dur,
+      duration: isRest ? `${rep.code}r` : rep.code,
       isRest,
       voice,
       accidentals: isRest ? [] : keys.map((_, k) => accidentalFor(keysToMidi(keys[k]), keyMap)),
       // a chain longer than one segment means its parts are tied together
       tieToNext: !isRest && i < segments.length - 1,
       tieFromPrev: !isRest && i > 0,
+      beats: rep.beats,
+      tuplet: rep.tuplet,
     };
   });
 }
@@ -401,7 +442,7 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
   const groups: OnsetGroup[] = [];
   for (const q of quantized) {
     const last = groups[groups.length - 1];
-    if (last && q.start - last.start < QUANTUM / 2 + EPS) {
+    if (last && q.start - last.start < CHORD_MERGE_BEATS + EPS) {
       last.end = Math.max(last.end, q.start + q.dur);
       if (!last.pitches.includes(q.pitchMidi)) last.pitches.push(q.pitchMidi);
     } else {
@@ -488,14 +529,14 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
     const sums = new Map<number, number>();
     measures[mi] = measures[mi].map((item) => {
       const sum = sums.get(item.voice) ?? 0;
-      const beats = beatsOf(item.duration);
-      if (sum + beats <= beatsPerMeasure + EPS) {
-        sums.set(item.voice, sum + beats);
+      if (sum + item.beats <= beatsPerMeasure + EPS) {
+        sums.set(item.voice, sum + item.beats);
         return item;
       }
-      const [b, code] = pickDuration(Math.max(QUANTUM, beatsPerMeasure - sum)) ?? ([QUANTUM, '16'] as [number, string]);
-      sums.set(item.voice, sum + b);
-      return { ...item, duration: item.isRest ? `${code}r` : code };
+      const rep = pickDuration(beatsPerMeasure - sum);
+      if (!rep) return item; // no representable duration fits — leave as is
+      sums.set(item.voice, sum + rep.beats);
+      return { ...item, duration: item.isRest ? `${rep.code}r` : rep.code, beats: rep.beats, tuplet: rep.tuplet };
     });
   }
 

@@ -8,6 +8,7 @@ import {
   StaveNote,
   StaveTie,
   Stem,
+  Tuplet,
   Voice,
 } from 'vexflow';
 import type { BuiltScore, MeasureItem } from '../transcribe/notation';
@@ -99,6 +100,7 @@ export function ScoreView({ score }: { score: BuiltScore }) {
 
           const voices: Voice[] = [];
           const voiceNotes: StaveNote[][] = [];
+          const tupletInstances: Tuplet[] = [];
           voiceEntries.forEach(([voiceIndex, voiceItems]) => {
             const notes = voiceItems.map((item) => {
               const note = new StaveNote({
@@ -118,10 +120,47 @@ export function ScoreView({ score }: { score: BuiltScore }) {
               return note;
             });
 
-            const voice = new Voice({ numBeats: settings.beatsPerMeasure, beatValue: 4 });
+            // group consecutive same-code tuplet notes into 3:2 triplet
+            // groups (Tuplet rescales their ticks to 2/3); every complete
+            // group of 3 gets a bracket, leftovers keep the same tick
+            // scaling via the multiplier so voice math stays exact
+            let run: StaveNote[] = [];
+            const flushRun = () => {
+              if (run.length === 3) {
+                tupletInstances.push(new Tuplet(run, { numNotes: 3, notesOccupied: 2 }));
+              } else {
+                run.forEach((n) => n.applyTickMultiplier(2, 3));
+              }
+              run = [];
+            };
+            for (let i = 0; i < voiceItems.length; i++) {
+              const item = voiceItems[i];
+              const prev = voiceItems[i - 1];
+              if (item.tuplet) {
+                const continues =
+                  run.length > 0 && prev?.tuplet && prev.duration === item.duration;
+                if (!continues && run.length > 0) flushRun();
+                run.push(notes[i]);
+                if (run.length === 3) flushRun();
+              } else if (run.length > 0) {
+                flushRun();
+              }
+            }
+            flushRun();
+
+            let voice = new Voice({ numBeats: settings.beatsPerMeasure, beatValue: 4 });
             voice.setMode(Voice.Mode.FULL);
             voice.setStave(stave);
-            voice.addTickables(notes);
+            try {
+              voice.addTickables(notes);
+            } catch {
+              // tick overflow guard: rebuild in SOFT mode instead of losing
+              // the whole measure
+              voice = new Voice({ numBeats: settings.beatsPerMeasure, beatValue: 4 });
+              voice.setMode(Voice.Mode.SOFT);
+              voice.setStave(stave);
+              voice.addTickables(notes);
+            }
             voices.push(voice);
             voiceNotes.push(notes);
           });
@@ -133,6 +172,7 @@ export function ScoreView({ score }: { score: BuiltScore }) {
             new Formatter().joinVoices(voices).formatToStave(voices, stave);
           }
           voices.forEach((v) => v.draw(ctx, stave));
+          tupletInstances.forEach((t) => t.setContext(ctx).draw());
 
           voiceEntries.forEach(([voiceIndex, voiceItems], vi) => {
             const notes = voiceNotes[vi];

@@ -37,7 +37,10 @@ export function filterNoiseEvents(
   const median = amplitudes.length > 0 ? amplitudes[Math.floor(amplitudes.length / 2)] : 0;
   const threshold = Math.max(minAmplitude, median * amplitudeFactor);
 
-  return events.filter(
-    (e) => e.amplitude >= threshold && e.durationSeconds >= minDurationSeconds,
-  );
+  return events.filter((e) => {
+    if (e.amplitude < threshold) return false; // quiet blobs are always noise
+    if (e.durationSeconds >= minDurationSeconds) return true;
+    // short but strong: fast real playing (e.g. rapid arpeggios), not spill
+    return e.amplitude >= median * 0.75;
+  });
 }
