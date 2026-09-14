@@ -18,10 +18,22 @@ const STAVE_WIDTH = 1050;
 const BASE_ROW_HEIGHT = 160;
 const MULTI_VOICE_ROW_HEIGHT = 210;
 const SVG_WIDTH = STAVE_WIDTH + 20;
+// VexFlow's default tick-to-width softmax; the spacing slider scales it
+const BASE_SOFTMAX_FACTOR = 10;
+const SPACING_STORAGE_KEY = 'staffscribe.spacing';
+
+export function loadSpacing(): number {
+  return Number(localStorage.getItem(SPACING_STORAGE_KEY)) || 1;
+}
+
+export function saveSpacing(spacing: number): void {
+  if (spacing === 1) localStorage.removeItem(SPACING_STORAGE_KEY);
+  else localStorage.setItem(SPACING_STORAGE_KEY, String(spacing));
+}
 
 export const SCORE_SHEET_ID = 'score-sheet';
 
-export function ScoreView({ score }: { score: BuiltScore }) {
+export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,8 +52,10 @@ export function ScoreView({ score }: { score: BuiltScore }) {
 
       const { measures, settings } = score;
       const clef = settings.clef === 'auto' ? 'treble' : settings.clef;
-      // fewer measures per row when the music is dense, so spacing stays readable
-      const measuresPerRow = pickMeasuresPerRow(measures.map((m) => m.length));
+      // fewer measures per row when the music is dense or the user wants
+      // extra spacing, so notes keep human-readable gaps
+      const denseRows = pickMeasuresPerRow(measures.map((m) => m.length));
+      const measuresPerRow = Math.max(1, Math.round(denseRows / spacing));
       const rows = chunk(measures, measuresPerRow);
 
       rows.forEach((rowMeasures, rowIndex) => {
@@ -165,11 +179,12 @@ export function ScoreView({ score }: { score: BuiltScore }) {
             voiceNotes.push(notes);
           });
 
+          const formatter = new Formatter({ softmaxFactor: BASE_SOFTMAX_FACTOR * spacing });
           try {
-            new Formatter().joinVoices(voices).formatToStave(voices, stave);
+            formatter.joinVoices(voices).formatToStave(voices, stave);
           } catch {
             voices.forEach((v) => v.setMode(Voice.Mode.SOFT));
-            new Formatter().joinVoices(voices).formatToStave(voices, stave);
+            formatter.joinVoices(voices).formatToStave(voices, stave);
           }
           voices.forEach((v) => v.draw(ctx, stave));
           tupletInstances.forEach((t) => t.setContext(ctx).draw());
@@ -252,7 +267,7 @@ export function ScoreView({ score }: { score: BuiltScore }) {
     return () => {
       cancelled = true;
     };
-  }, [score]);
+  }, [score, spacing]);
 
   return <div id={SCORE_SHEET_ID} ref={containerRef} className="score-sheet" />;
 }

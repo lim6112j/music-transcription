@@ -19,7 +19,7 @@ import {
   estimateTempo,
   type BuiltScore,
 } from './transcribe/notation';
-import { ScoreView, SCORE_SHEET_ID } from './render/ScoreView';
+import { ScoreView, SCORE_SHEET_ID, loadSpacing, saveSpacing } from './render/ScoreView';
 import { exportScorePdf } from './render/exportPdf';
 
 type Status = 'idle' | 'fetching' | 'decoding' | 'analyzing' | 'ready';
@@ -50,6 +50,7 @@ export default function App() {
   const [clef, setClef] = useState<'auto' | 'treble' | 'bass'>('auto');
   const [keySpec, setKeySpec] = useState('C');
   const [noiseFilter, setNoiseFilter] = useState<NoiseFilterLevel>('medium');
+  const [spacing, setSpacing] = useState(() => loadSpacing());
   const [exporting, setExporting] = useState(false);
   const [playback, setPlayback] = useState<PlaybackHandle | null>(null);
   const [playingMeasure, setPlayingMeasure] = useState<number | null>(null);
@@ -455,6 +456,21 @@ export default function App() {
                 <option value="high">High</option>
               </select>
             </label>
+            <label className="field">
+              <span>Note spacing ×{spacing.toFixed(1)}</span>
+              <input
+                type="range"
+                min={1}
+                max={2.5}
+                step={0.1}
+                value={spacing}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  setSpacing(value);
+                  saveSpacing(value);
+                }}
+              />
+            </label>
             {noteEvents && filteredEvents?.length === 0 ? (
               <p className="hint">All detected notes were filtered out — lower the noise filter.</p>
             ) : (
@@ -483,7 +499,7 @@ export default function App() {
                   Playing — measure {playingMeasure + 1} of {score.totalMeasures}
                 </p>
               )}
-              <ScoreView score={score} />
+              <ScoreView score={score} spacing={spacing} />
             </>
           )}
           {!statusLabel && !score && (
