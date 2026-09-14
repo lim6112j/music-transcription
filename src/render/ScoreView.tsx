@@ -5,9 +5,9 @@ import {
   Formatter,
   Renderer,
   Stave,
+  StaveConnector,
   StaveNote,
   StaveTie,
-  Stem,
   Tuplet,
   Voice,
 } from 'vexflow';
@@ -15,9 +15,13 @@ import type { BuiltScore, MeasureItem } from '../transcribe/notation';
 import { pickMeasuresPerRow } from '../transcribe/notation';
 
 const STAVE_WIDTH = 1050;
-const BASE_ROW_HEIGHT = 160;
-const MULTI_VOICE_ROW_HEIGHT = 210;
 const SVG_WIDTH = STAVE_WIDTH + 20;
+// single-staff row height (single-voice scores)
+const BASE_ROW_HEIGHT = 160;
+// grand staff (piano notation): treble staff on top, bass below, joined
+const GRAND_STAFF_ROW_HEIGHT = 240;
+const TREBLE_Y = 10;
+const BASS_Y = 170;
 // VexFlow's default tick-to-width softmax; the spacing slider scales it
 const BASE_SOFTMAX_FACTOR = 10;
 const SPACING_STORAGE_KEY = 'staffscribe.spacing';
@@ -51,7 +55,10 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
       container.innerHTML = '';
 
       const { measures, settings } = score;
-      const clef = settings.clef === 'auto' ? 'treble' : settings.clef;
+      // grand staff (piano notation) when any measure layers two hands
+      const isGrand = measures.some((m) => m.some((i) => i.voice > 0));
+      const singleClef = settings.clef === 'auto' ? 'treble' : settings.clef;
+
       // fewer measures per row when the music is dense or the user wants
       // extra spacing, so notes keep human-readable gaps
       const denseRows = pickMeasuresPerRow(measures.map((m) => m.length));
@@ -63,9 +70,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
         rowDiv.className = 'score-row';
         container.appendChild(rowDiv);
 
-        // multi-voice rows need vertical room for separated stems
-        const rowMultiVoice = rowMeasures.some((items) => items.some((i) => i.voice > 0));
-        const svgHeight = (rowMultiVoice ? MULTI_VOICE_ROW_HEIGHT : BASE_ROW_HEIGHT) + 20;
+        const svgHeight = (isGrand ? GRAND_STAFF_ROW_HEIGHT : BASE_ROW_HEIGHT) + 20;
         const renderer = new Renderer(rowDiv, Renderer.Backends.SVG);
         renderer.resize(SVG_WIDTH, svgHeight);
         const ctx = renderer.getContext();
@@ -75,15 +80,15 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
 
         rowMeasures.forEach((items, col) => {
           const absIndex = firstMeasureAbsolute + col;
-          const stave = new Stave(10 + col * staveW, 10, staveW);
-          if (col === 0) {
-            stave.addClef(clef);
-            stave.addKeySignature(settings.keySpec);
-          }
-          if (absIndex === 0) {
-            stave.addTimeSignature(`${settings.beatsPerMeasure}/4`);
-          }
-          stave.setContext(ctx).draw();
+
+          // per-row median pitch of a voice, for hand/staff assignment
+          const medianMidi = (voiceItems: MeasureItem[]): number => {
+            const pitches = voiceItems
+              .filter((it) => !it.isRest)
+              .flatMap((it) => it.keys.map(keyToMidi))
+              .sort((a, b) => a - b);
+            return pitches.length > 0 ? pitches[Math.floor(pitches.length / 2)] : -1;
+          };
 
           // partition the measure's items into their voice layers
           const byVoice = new Map<number, MeasureItem[]>();
@@ -93,39 +98,64 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
             else byVoice.set(item.voice, [item]);
           }
           const voiceEntries = [...byVoice.entries()].sort((a, b) => a[0] - b[0]);
-          const multiVoice = voiceEntries.length > 1;
 
-          // keyboard convention: the upper voice stems up, the lower stems
-          // down — decided per row by each voice's median pitch
-          const medianMidi = (voiceItems: MeasureItem[]): number => {
-            const pitches = voiceItems
-              .filter((it) => !it.isRest)
-              .flatMap((it) => it.keys.map(keyToMidi))
-              .sort((a, b) => a - b);
-            return pitches.length > 0 ? pitches[Math.floor(pitches.length / 2)] : -1;
+          // one staff per hand: the higher hand reads the treble staff, the
+          // lower hand the bass staff (2-voice cap keeps this unambiguous)
+          const staves = {
+            treble: new Stave(10 + col * staveW, TREBLE_Y, staveW),
+            bass: isGrand ? new Stave(10 + col * staveW, BASS_Y, staveW) : null,
           };
-          const stemUpVoices = new Set<number>();
-          if (multiVoice) {
-            const sorted = [...voiceEntries].sort(
-              (a, b) => medianMidi(b[1]) - medianMidi(a[1]) || a[0] - b[0],
-            );
-            sorted.slice(0, Math.ceil(sorted.length / 2)).forEach(([vi]) => stemUpVoices.add(vi));
+          const staffForVoice = new Map<number, 'treble' | 'bass'>();
+          if (isGrand) {
+            const sorted = voiceEntries
+              .map(([vi, viItems]) => ({ vi, median: medianMidi(viItems) }))
+              .sort((a, b) => b.median - a.median || a.vi - b.vi);
+            sorted.forEach((entry, rank) => {
+              staffForVoice.set(entry.vi, rank === 0 ? 'treble' : 'bass');
+            });
+          }
+          const staveOf = (vi: number): Stave =>
+            staffForVoice.get(vi) === 'bass' ? staves.bass! : staves.treble;
+          const clefOf = (vi: number): 'treble' | 'bass' => staffForVoice.get(vi) ?? 'treble';
+
+          if (col === 0) {
+            staves.treble.addClef(isGrand ? 'treble' : singleClef);
+            staves.treble.addKeySignature(settings.keySpec);
+            if (staves.bass) {
+              staves.bass.addClef('bass');
+              staves.bass.addKeySignature(settings.keySpec);
+            }
+          }
+          if (absIndex === 0) {
+            staves.treble.addTimeSignature(`${settings.beatsPerMeasure}/4`);
+            staves.bass?.addTimeSignature(`${settings.beatsPerMeasure}/4`);
+          }
+          staves.treble.setContext(ctx).draw();
+          staves.bass?.setContext(ctx).draw();
+          if (isGrand) {
+            // brace + right barline joining the two staves
+            new StaveConnector(staves.treble, staves.bass!)
+              .setType(StaveConnector.type.BRACE)
+              .setContext(ctx)
+              .draw();
+            new StaveConnector(staves.treble, staves.bass!)
+              .setType(StaveConnector.type.SINGLE_RIGHT)
+              .setContext(ctx)
+              .draw();
           }
 
-          const voices: Voice[] = [];
-          const voiceNotes: StaveNote[][] = [];
-          const tupletInstances: Tuplet[] = [];
+          const formatter = new Formatter({ softmaxFactor: BASE_SOFTMAX_FACTOR * spacing });
+
+          // build + format each hand's voice on its own staff
           voiceEntries.forEach(([voiceIndex, voiceItems]) => {
+            const voiceStave = staveOf(voiceIndex);
             const notes = voiceItems.map((item) => {
               const note = new StaveNote({
                 keys: item.keys,
                 duration: item.duration,
-                clef,
-                autoStem: !multiVoice && !item.isRest,
+                clef: clefOf(voiceIndex),
+                autoStem: !isGrand && !item.isRest,
               });
-              if (multiVoice && !item.isRest) {
-                note.setStemDirection(stemUpVoices.has(voiceIndex) ? Stem.UP : Stem.DOWN);
-              }
               if (!item.isRest) {
                 item.accidentals.forEach((acc, i) => {
                   if (acc) note.addModifier(new Accidental(acc), i);
@@ -141,7 +171,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
             let run: StaveNote[] = [];
             const flushRun = () => {
               if (run.length === 3) {
-                tupletInstances.push(new Tuplet(run, { numNotes: 3, notesOccupied: 2 }));
+                new Tuplet(run, { numNotes: 3, notesOccupied: 2 }).setContext(ctx).draw();
               } else {
                 run.forEach((n) => n.applyTickMultiplier(2, 3));
               }
@@ -164,7 +194,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
 
             let voice = new Voice({ numBeats: settings.beatsPerMeasure, beatValue: 4 });
             voice.setMode(Voice.Mode.FULL);
-            voice.setStave(stave);
+            voice.setStave(voiceStave);
             try {
               voice.addTickables(notes);
             } catch {
@@ -172,25 +202,15 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
               // the whole measure
               voice = new Voice({ numBeats: settings.beatsPerMeasure, beatValue: 4 });
               voice.setMode(Voice.Mode.SOFT);
-              voice.setStave(stave);
+              voice.setStave(voiceStave);
               voice.addTickables(notes);
             }
-            voices.push(voice);
-            voiceNotes.push(notes);
-          });
-
-          const formatter = new Formatter({ softmaxFactor: BASE_SOFTMAX_FACTOR * spacing });
-          try {
-            formatter.joinVoices(voices).formatToStave(voices, stave);
-          } catch {
-            voices.forEach((v) => v.setMode(Voice.Mode.SOFT));
-            formatter.joinVoices(voices).formatToStave(voices, stave);
-          }
-          voices.forEach((v) => v.draw(ctx, stave));
-          tupletInstances.forEach((t) => t.setContext(ctx).draw());
-
-          voiceEntries.forEach(([voiceIndex, voiceItems], vi) => {
-            const notes = voiceNotes[vi];
+            try {
+              formatter.joinVoices([voice]).formatToStave([voice], voiceStave);
+              voice.draw(ctx, voiceStave);
+            } catch {
+              /* skip unformattable voice */
+            }
 
             // beams for eighth/shorter notes
             const beamable = notes.filter(
