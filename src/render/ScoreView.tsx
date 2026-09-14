@@ -79,7 +79,16 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
         const tieFromByVoice = new Map<number, StaveNote[]>();
 
         rowMeasures.forEach((items, col) => {
-          const absIndex = firstMeasureAbsolute + col;
+          const absIdx = firstMeasureAbsolute + col;
+          try {
+            drawMeasure(items, col, absIdx);
+          } catch (e) {
+            // one malformed measure must never truncate the rest of the score
+            console.warn(`ScoreView: measure ${absIdx} failed to draw`, e);
+          }
+        });
+
+        function drawMeasure(items: MeasureItem[], col: number, absIdx: number): void {
 
           // per-row median pitch of a voice, for hand/staff assignment
           const medianMidi = (voiceItems: MeasureItem[]): number => {
@@ -126,7 +135,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
               staves.bass.addKeySignature(settings.keySpec);
             }
           }
-          if (absIndex === 0) {
+          if (absIdx === 0) {
             staves.treble.addTimeSignature(`${settings.beatsPerMeasure}/4`);
             staves.bass?.addTimeSignature(`${settings.beatsPerMeasure}/4`);
           }
@@ -168,10 +177,14 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
             // groups (Tuplet rescales their ticks to 2/3); every complete
             // group of 3 gets a bracket, leftovers keep the same tick
             // scaling via the multiplier so voice math stays exact
+            const tuplets: Tuplet[] = [];
             let run: StaveNote[] = [];
             const flushRun = () => {
               if (run.length === 3) {
-                new Tuplet(run, { numNotes: 3, notesOccupied: 2 }).setContext(ctx).draw();
+                // the constructor scales the notes' ticks to 2/3 (needed
+                // before addTickables); the bracket itself is drawn after
+                // formatting, when the notes have x/y positions
+                tuplets.push(new Tuplet(run, { numNotes: 3, notesOccupied: 2 }));
               } else {
                 run.forEach((n) => n.applyTickMultiplier(2, 3));
               }
@@ -208,9 +221,20 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
             try {
               formatter.joinVoices([voice]).formatToStave([voice], voiceStave);
               voice.draw(ctx, voiceStave);
-            } catch {
-              /* skip unformattable voice */
+            } catch (e) {
+              // a skipped voice is missing notes — surface it, don't lose it
+              console.warn('ScoreView: voice failed to format/draw', e);
             }
+
+            // tuplet brackets need the formatted note positions, so they are
+            // drawn only here — never before the voice is laid out
+            tuplets.forEach((tuplet) => {
+              try {
+                tuplet.setContext(ctx).draw();
+              } catch {
+                /* skip malformed tuplet bracket */
+              }
+            });
 
             // beams for eighth/shorter notes
             const beamable = notes.filter(
@@ -279,7 +303,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
               tieFromByVoice.delete(voiceIndex);
             }
           });
-        });
+        }
       });
     };
 
