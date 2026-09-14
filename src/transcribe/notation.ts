@@ -233,6 +233,38 @@ export function detectClef(events: NoteEvent[]): 'treble' | 'bass' {
   return median < 58 ? 'bass' : 'treble';
 }
 
+// ---------- Editing ----------
+
+const MIN_EVENT_LEN_S = 1e-4;
+
+/**
+ * Remove the time span [t0, t1) from an event list: events starting inside
+ * are deleted, notes sounding across the boundary are clipped to end at t0,
+ * and later events shift left by the span so the remaining measures stay
+ * consecutive. Pure — returns a new array.
+ */
+export function deleteTimeRange(events: NoteEvent[], t0: number, t1: number): NoteEvent[] {
+  if (t1 <= t0) return events;
+  const span = t1 - t0;
+  const out: NoteEvent[] = [];
+  for (const e of events) {
+    const end = e.startTimeSeconds + e.durationSeconds;
+    if (e.startTimeSeconds >= t1) {
+      // entirely after the range → close the gap
+      out.push({ ...e, startTimeSeconds: e.startTimeSeconds - span });
+    } else if (e.startTimeSeconds >= t0) {
+      // starts inside the range → deleted
+    } else if (end > t0) {
+      // started before but sounds into the range → clip the tail
+      const clipped = { ...e, durationSeconds: t0 - e.startTimeSeconds };
+      if (clipped.durationSeconds >= MIN_EVENT_LEN_S) out.push(clipped);
+    } else {
+      out.push(e);
+    }
+  }
+  return out;
+}
+
 // ---------- Score layout ----------
 
 // item counts (notes+rests) per measure above which a row carries fewer

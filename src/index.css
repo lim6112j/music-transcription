@@ -51,7 +51,8 @@ body {
   }
   .app-header,
   .sidebar,
-  .error-banner {
+  .error-banner,
+  #score-sheet .row-delete {
     display: none !important;
   }
 }

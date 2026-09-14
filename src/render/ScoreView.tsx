@@ -37,7 +37,16 @@ export function saveSpacing(spacing: number): void {
 
 export const SCORE_SHEET_ID = 'score-sheet';
 
-export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?: number }) {
+export function ScoreView({
+  score,
+  spacing = 1,
+  onDeleteRow,
+}: {
+  score: BuiltScore;
+  spacing?: number;
+  /** Called with the absolute measure range of a row when its ✕ is clicked. */
+  onDeleteRow?: (startMeasure: number, count: number) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,6 +78,24 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
         const rowDiv = document.createElement('div');
         rowDiv.className = 'score-row';
         container.appendChild(rowDiv);
+
+        // editing affordance: remove this row's measures from the score.
+        // HTML overlay (not SVG) so the PDF exporter, which reads only the
+        // <svg> elements, never sees it; print hides it via CSS.
+        if (onDeleteRow) {
+          const firstMeasure = rowIndex * measuresPerRow;
+          const deleteBtn = document.createElement('button');
+          deleteBtn.type = 'button';
+          deleteBtn.className = 'row-delete';
+          deleteBtn.textContent = '✕';
+          deleteBtn.title = 'Delete this row of measures';
+          deleteBtn.setAttribute(
+            'aria-label',
+            `Delete measures ${firstMeasure + 1}–${firstMeasure + rowMeasures.length}`,
+          );
+          deleteBtn.addEventListener('click', () => onDeleteRow(firstMeasure, rowMeasures.length));
+          rowDiv.appendChild(deleteBtn);
+        }
 
         const svgHeight = (isGrand ? GRAND_STAFF_ROW_HEIGHT : BASE_ROW_HEIGHT) + 20;
         const renderer = new Renderer(rowDiv, Renderer.Backends.SVG);
@@ -311,7 +338,7 @@ export function ScoreView({ score, spacing = 1 }: { score: BuiltScore; spacing?:
     return () => {
       cancelled = true;
     };
-  }, [score, spacing]);
+  }, [score, spacing, onDeleteRow]);
 
   return <div id={SCORE_SHEET_ID} ref={containerRef} className="score-sheet" />;
 }

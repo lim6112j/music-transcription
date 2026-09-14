@@ -334,12 +334,46 @@
 
 .score-row {
   width: 100%;
+  position: relative;
 }
 
 .score-row svg {
   width: 100%;
   height: auto;
   display: block;
+}
+
+/* per-row delete affordance (editing only — hidden for print, and the PDF
+   exporter reads just the row's <svg>) */
+.row-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #e0dbeb;
+  border-radius: 50%;
+  background: #fff;
+  color: #8a8199;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.45;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.score-row:hover .row-delete,
+.row-delete:focus-visible {
+  opacity: 1;
+}
+
+.row-delete:hover {
+  color: #c0392b;
+  border-color: #c0392b;
 }
 
 /* ---------- Progress / empty state ---------- */

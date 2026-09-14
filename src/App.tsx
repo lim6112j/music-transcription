@@ -14,6 +14,7 @@ import { transcribeAudio, type NoteEvent } from './transcribe/transcribe';
 import { filterNoiseEvents, type NoiseFilterLevel } from './transcribe/filter';
 import {
   buildScore,
+  deleteTimeRange,
   detectClef,
   estimateKeySpec,
   estimateTempo,
@@ -229,6 +230,22 @@ export default function App() {
     playbackRef.current = handle;
     setPlayback(handle);
   }, [score, stopPlayback]);
+
+  // removing a staff row deletes the events sounding in its measures and
+  // closes the gap, so the remaining music stays consecutive
+  const handleDeleteRow = useCallback(
+    (startMeasure: number, count: number) => {
+      stopPlayback();
+      setNoteEvents((events) => {
+        if (!events) return events;
+        const spb = 60 / tempo;
+        const t0 = startMeasure * beatsPerMeasure * spb;
+        const t1 = (startMeasure + count) * beatsPerMeasure * spb;
+        return deleteTimeRange(events, t0, t1);
+      });
+    },
+    [tempo, beatsPerMeasure, stopPlayback],
+  );
 
   const handleExportPdf = useCallback(async () => {
     const el = document.getElementById(SCORE_SHEET_ID);
@@ -499,7 +516,7 @@ export default function App() {
                   Playing — measure {playingMeasure + 1} of {score.totalMeasures}
                 </p>
               )}
-              <ScoreView score={score} spacing={spacing} />
+              <ScoreView score={score} spacing={spacing} onDeleteRow={handleDeleteRow} />
             </>
           )}
           {!statusLabel && !score && (
