@@ -36,14 +36,6 @@ const DUR_BEATS: Array<[number, string]> = [
   [0.25, '16'],
 ];
 
-// triplet durations share the nominal code with their straight counterparts
-// but sound short: 3 of them fit where 2 straight notes would (3:2 tuplet)
-const TRIPLET_DUR_BEATS: Array<[number, string]> = [
-  [2 / 3, 'q'],
-  [1 / 3, '8'],
-  [1 / 6, '16'],
-];
-
 const QUANTUM = 1 / 12; // grid unit: 1/12 beat covers straight 16ths (3 units) and triplets (2/4 units)
 const CHORD_MERGE_BEATS = 0.125; // onsets closer than this merge into one chord
 const EPS = 1e-6;
@@ -56,40 +48,36 @@ export function beatsOf(duration: string): number {
   return found ? found[0] : 0;
 }
 
-/** Straight duration exactly matching beats, if one exists. */
-function exactStraight(beats: number): [number, string] | null {
-  return DUR_BEATS.find(([b]) => Math.abs(b - beats) < EPS) ?? null;
-}
-
-/** Triplet duration exactly matching beats, if one exists. */
-function exactTriplet(beats: number): [number, string] | null {
-  return TRIPLET_DUR_BEATS.find(([b]) => Math.abs(b - beats) < EPS) ?? null;
-}
-
 interface DurationRep {
   code: string; // VexFlow duration code (nominal)
   beats: number; // actual beats sounded
   tuplet: boolean;
 }
 
-function durationForBeats(beats: number): DurationRep | null {
-  const straight = exactStraight(beats);
-  if (straight) return { code: straight[1], beats: straight[0], tuplet: false };
-  const triplet = exactTriplet(beats);
-  if (triplet) return { code: triplet[1], beats: triplet[0], tuplet: true };
-  return null;
-}
+// Notatable pieces in 1/12-beat units, ordered for decomposition: straight
+// values descending, then triplets descending. Every multiple of 1/12 except
+// exactly 1 decomposes into these pieces (2 and 3 alone generate the rest).
+const VOCAB: Array<{ twelfths: number; rep: DurationRep }> = [
+  { twelfths: 48, rep: { code: 'w', beats: 4, tuplet: false } },
+  { twelfths: 36, rep: { code: 'hd', beats: 3, tuplet: false } },
+  { twelfths: 24, rep: { code: 'h', beats: 2, tuplet: false } },
+  { twelfths: 18, rep: { code: 'qd', beats: 1.5, tuplet: false } },
+  { twelfths: 12, rep: { code: 'q', beats: 1, tuplet: false } },
+  { twelfths: 9, rep: { code: '8d', beats: 0.75, tuplet: false } },
+  { twelfths: 6, rep: { code: '8', beats: 0.5, tuplet: false } },
+  { twelfths: 3, rep: { code: '16', beats: 0.25, tuplet: false } },
+  { twelfths: 8, rep: { code: 'q', beats: 2 / 3, tuplet: true } },
+  { twelfths: 4, rep: { code: '8', beats: 1 / 3, tuplet: true } },
+  { twelfths: 2, rep: { code: '16', beats: 1 / 6, tuplet: true } },
+];
+
+const MIN_BLOCK_TWELFTHS = 2; // nothing notatable is shorter than a triplet 16th
 
 function pickDuration(maxBeats: number): DurationRep | null {
-  // exact straight match first, then exact triplet (so triplet-shaped gaps
-  // fill exactly instead of leaving a 1/12-beat remainder), then largest fit
-  return (
-    durationForBeats(maxBeats) ??
-    (() => {
-      const fallback = DUR_BEATS.find(([b]) => b <= maxBeats + EPS);
-      return fallback ? { code: fallback[1], beats: fallback[0], tuplet: false } : null;
-    })()
-  );
+  // exact straight match first, then largest fit — overflow safety net only;
+  // segment sizing goes through decomposeSpan, which never leaves remainders
+  const fallback = DUR_BEATS.find(([b]) => b <= maxBeats + EPS);
+  return fallback ? { code: fallback[1], beats: fallback[0], tuplet: false } : null;
 }
 
 // ---------- Tempo estimation ----------
@@ -362,40 +350,68 @@ function accidentalFor(midi: number, keyMap: Record<string, '#' | 'b' | ''>): st
 // ---------- Segmentation ----------
 
 /**
- * Split a note starting at absolute beat position with given length into
- * segments that respect measure boundaries and avoid crossing the middle of
- * a measure (unless starting exactly at the measure start).
+ * Split a span of `lenTw` twelfths (1/12 beat) starting at absolute twelfth
+ * position `startTw` into notatable segments. Respects measure boundaries
+ * (pieces never cross a barline) and prefers stopping at the middle of a
+ * measure, falling back to a crossing piece only when stopping there would
+ * strand an unnotatable remainder. Returns null for spans no combination can
+ * express — callers tile the timeline so every span is ≥ 2 twelfths.
  */
-function splitIntoSegments(
-  start: number,
-  length: number,
+function decomposeSpan(
+  startTw: number,
+  lenTw: number,
   beatsPerMeasure: number,
-): Array<{ start: number; beats: number }> {
-  const segments: Array<{ start: number; beats: number }> = [];
-  let pos = start;
-  let remaining = length;
-  let guard = 0;
-  while (remaining > EPS && guard++ < 64) {
-    const measureIndex = Math.floor(pos / beatsPerMeasure + EPS);
-    const measureStart = measureIndex * beatsPerMeasure;
-    const measureEnd = measureStart + beatsPerMeasure;
-    const half = measureStart + beatsPerMeasure / 2;
-    let cap = measureEnd - pos;
-    const atMeasureStart = Math.abs(pos - measureStart) < EPS;
-    if (!atMeasureStart && pos < half - EPS) {
-      cap = Math.min(cap, half - pos);
+): Array<{ start: number; rep: DurationRep }> | null {
+  const perMeasure = beatsPerMeasure * 12;
+  const memo = new Map<string, number | null>();
+  // largest notatable piece at posTw with remTw left, 0 = done, null = stuck
+  const firstPiece = (posTw: number, remTw: number): number | null => {
+    if (remTw === 0) return 0;
+    const key = `${posTw}:${remTw}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const into = posTw % perMeasure;
+    const toBarline = perMeasure - into;
+    const toHalf = into !== 0 && into * 2 < perMeasure ? perMeasure / 2 - into : toBarline;
+    let out: number | null = null;
+    for (const { twelfths } of VOCAB) {
+      if (twelfths > remTw || twelfths > toBarline || twelfths > toHalf) continue;
+      if (firstPiece(posTw + twelfths, remTw - twelfths) !== null) {
+        out = twelfths;
+        break;
+      }
     }
-    const pick = pickDuration(Math.min(remaining, cap));
-    if (!pick) break;
-    segments.push({ start: pos, beats: pick.beats });
-    pos += pick.beats;
-    remaining -= pick.beats;
+    if (out === null && toHalf < toBarline) {
+      // the mid-measure split point is unreachable from here — let one
+      // piece cross it instead of leaving the rest of the measure blank
+      for (const { twelfths } of VOCAB) {
+        if (twelfths > remTw || twelfths > toBarline) continue;
+        if (firstPiece(posTw + twelfths, remTw - twelfths) !== null) {
+          out = twelfths;
+          break;
+        }
+      }
+    }
+    memo.set(key, out);
+    return out;
+  };
+
+  const segments: Array<{ start: number; rep: DurationRep }> = [];
+  let posTw = startTw;
+  let remaining = lenTw;
+  while (remaining > 0) {
+    const piece = firstPiece(posTw, remaining);
+    if (piece === null || piece === 0) return null;
+    const rep = VOCAB.find((v) => v.twelfths === piece)!.rep;
+    segments.push({ start: posTw / 12, rep });
+    posTw += piece;
+    remaining -= piece;
   }
   return segments;
 }
 
-function measureIndexOf(seg: { start: number }, beatsPerMeasure: number): number {
-  return Math.floor(seg.start / beatsPerMeasure + EPS);
+function measureIndexOf(start: number, beatsPerMeasure: number): number {
+  return Math.floor(start / beatsPerMeasure + EPS);
 }
 
 interface OnsetGroup {
@@ -404,26 +420,104 @@ interface OnsetGroup {
   pitches: number[];
 }
 
+// a contiguous run of the timeline sounding either notes or rest; twelfths
+interface TimelineBlock {
+  startTw: number;
+  endTw: number;
+  pitches: number[] | null; // null = rest
+}
+
+/**
+ * Tile one voice's timeline [0, scoreEndTw) with note/rest blocks. Quantized
+ * onsets can leave 1/12-beat slivers the duration vocabulary cannot express,
+ * so each sliver is absorbed into a neighbouring block: after a block
+ * (sustain or longer rest), before the score end (shorter trailing rest), or
+ * — when there is no neighbour at all — by pulling the onset itself. Blocks
+ * therefore tile the timeline exactly and are all ≥ 2 twelfths, which is
+ * what guarantees every measure fills to the barline.
+ */
+function tileVoice(gs: OnsetGroup[], scoreEndTw: number, beatsPerMeasure: number): TimelineBlock[] {
+  const perMeasure = beatsPerMeasure * 12;
+  const blocks: TimelineBlock[] = [];
+  let pos = 0; // tiling cursor in twelfths
+  for (const g of gs) {
+    let s = Math.round(g.start * 12);
+    // Pieces never cross a barline, so two block boundaries are unnotatable
+    // and the onset is pulled off them (a 41 ms shift, inaudible):
+    // — 1 twelfth before a barline: the opening window fits no piece
+    // — 1 twelfth after a barline: the tail would strand a 1/12 stub
+    const last = blocks[blocks.length - 1];
+    if (s % perMeasure === perMeasure - 1) {
+      if (last && last.endTw === s && last.pitches && last.endTw - last.startTw <= MIN_BLOCK_TWELFTHS) {
+        s = last.startTw; // fold a tiny neighbour into this chord
+        blocks.pop();
+      } else {
+        s -= 1;
+        if (last && last.endTw === s + 1) last.endTw -= 1; // trim the neighbour by 1/12
+      }
+    } else if (s > perMeasure && s % perMeasure === 1) {
+      s -= 1;
+      if (last && last.endTw === s + 1) last.endTw -= 1;
+    }
+    const gap = s - pos;
+    if (gap === 1 && blocks.length > 0) {
+      blocks[blocks.length - 1].endTw += 1; // sustain / tie over the sliver
+    } else if (gap > 1) {
+      blocks.push({ startTw: pos, endTw: s, pitches: null }); // rest fill
+    } else if (gap === 1) {
+      s = pos; // leading sliver: pull the note 1/12 beat earlier
+    }
+    let e = Math.max(Math.round(g.end * 12), s + MIN_BLOCK_TWELFTHS); // notate sub-1/6 notes
+    // same boundary rules for tails: no stub after a barline, and no end
+    // 1 twelfth short of one — the following rest would open in the dead
+    // 1/12 window before the barline
+    if (e % perMeasure === 1 || e % perMeasure === perMeasure - 1) e -= 1;
+    const prev = blocks[blocks.length - 1];
+    if (prev && prev.pitches && prev.endTw > s) {
+      // padding collided with the next onset — sound both as one chord
+      prev.endTw = Math.max(prev.endTw, e);
+      for (const p of g.pitches) if (!prev.pitches.includes(p)) prev.pitches.push(p);
+    } else {
+      blocks.push({ startTw: s, endTw: e, pitches: [...g.pitches].sort((a, b) => a - b) });
+    }
+    pos = Math.max(pos, blocks[blocks.length - 1].endTw);
+  }
+  // trailing rest completes the final measure
+  if (pos < scoreEndTw) {
+    if (scoreEndTw - pos === 1 && blocks.length > 0) {
+      const last = blocks[blocks.length - 1];
+      if (last.endTw - last.startTw >= MIN_BLOCK_TWELFTHS + 1) {
+        last.endTw -= 1; // give the last twelfth to the rest
+      } else {
+        last.endTw += 1; // block would become unnotatable — extend it instead
+      }
+      pos = last.endTw;
+    }
+    if (pos < scoreEndTw) blocks.push({ startTw: pos, endTw: scoreEndTw, pitches: null });
+  }
+  return blocks;
+}
+
 function makeItems(
-  segments: Array<{ start: number; beats: number }>,
-  keys: string[],
-  isRest: boolean,
+  block: TimelineBlock,
+  segments: Array<{ start: number; rep: DurationRep }>,
   keyMap: Record<string, '#' | 'b' | ''>,
   voice: number,
 ): MeasureItem[] {
+  const keys = block.pitches === null ? ['b/4'] : block.pitches.map(midiToKeySpec);
+  const isRest = block.pitches === null;
   return segments.map((seg, i) => {
-    const rep = durationForBeats(seg.beats) ?? { code: 'q', beats: 1, tuplet: false };
     return {
       keys: isRest ? ['b/4'] : keys,
-      duration: isRest ? `${rep.code}r` : rep.code,
+      duration: isRest ? `${seg.rep.code}r` : seg.rep.code,
       isRest,
       voice,
       accidentals: isRest ? [] : keys.map((_, k) => accidentalFor(keysToMidi(keys[k]), keyMap)),
       // a chain longer than one segment means its parts are tied together
       tieToNext: !isRest && i < segments.length - 1,
       tieFromPrev: !isRest && i > 0,
-      beats: rep.beats,
-      tuplet: rep.tuplet,
+      beats: seg.rep.beats,
+      tuplet: seg.rep.tuplet,
     };
   });
 }
@@ -436,21 +530,20 @@ export function keysToMidi(key: string): number {
 }
 
 /**
- * Build items for a whole segment chain and place each item into the measure
+ * Build items for a decomposed block and place each item into the measure
  * its segment belongs to, so ties across measure boundaries stay intact.
  */
 function appendItems(
   measures: MeasureItem[][],
-  segments: Array<{ start: number; beats: number }>,
-  keys: string[],
-  isRest: boolean,
+  block: TimelineBlock,
+  segments: Array<{ start: number; rep: DurationRep }>,
   keyMap: Record<string, '#' | 'b' | ''>,
   voice: number,
   beatsPerMeasure: number,
 ): void {
-  const items = makeItems(segments, keys, isRest, keyMap, voice);
+  const items = makeItems(block, segments, keyMap, voice);
   segments.forEach((seg, i) => {
-    const mi = measureIndexOf(seg, beatsPerMeasure);
+    const mi = measureIndexOf(seg.start, beatsPerMeasure);
     if (mi >= 0 && mi < measures.length) measures[mi].push(items[i]);
   });
 }
@@ -517,42 +610,15 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
   );
   const totalMeasures = Math.min(MAX_MEASURES, Math.max(1, Math.ceil(lastEnd / beatsPerMeasure - EPS)));
 
-  // 5. Lay out each voice measure by measure; gaps become rests
+  // 5. Tile each voice's timeline with note/rest blocks, then decompose the
+  // blocks into notatable segments; tiling guarantees exact measure fills
   const measures: MeasureItem[][] = Array.from({ length: totalMeasures }, () => []);
+  const scoreEndTw = totalMeasures * beatsPerMeasure * 12;
   voices.forEach((gs, voice) => {
-    let cursor = 0;
-    for (const g of gs) {
-      if (g.start > cursor + EPS) {
-        appendItems(
-          measures,
-          splitIntoSegments(cursor, g.start - cursor, beatsPerMeasure),
-          [],
-          true,
-          keyMap,
-          voice,
-          beatsPerMeasure,
-        );
-        cursor = g.start;
-      }
-      const keys = g.pitches.map(midiToKeySpec);
-      const noteLen = Math.max(QUANTUM, g.end - g.start);
-      const segs = splitIntoSegments(g.start, noteLen, beatsPerMeasure);
-      appendItems(measures, segs, keys, false, keyMap, voice, beatsPerMeasure);
-      const last = segs[segs.length - 1];
-      cursor = Math.max(cursor, last ? last.start + last.beats : g.start);
-    }
-    // trailing rest completes the final measure
-    const scoreEnd = totalMeasures * beatsPerMeasure;
-    if (cursor < scoreEnd - EPS) {
-      appendItems(
-        measures,
-        splitIntoSegments(cursor, scoreEnd - cursor, beatsPerMeasure),
-        [],
-        true,
-        keyMap,
-        voice,
-        beatsPerMeasure,
-      );
+    for (const block of tileVoice(gs, scoreEndTw, beatsPerMeasure)) {
+      const segments = decomposeSpan(block.startTw, block.endTw - block.startTw, beatsPerMeasure);
+      if (!segments) continue; // unreachable: tiling yields blocks ≥ 2 twelfths
+      appendItems(measures, block, segments, keyMap, voice, beatsPerMeasure);
     }
   });
 
