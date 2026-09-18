@@ -39,11 +39,21 @@ transcribed locally — the app itself stays fully client-side.
 
 **Instance configuration** (under "Cobalt instance settings" in the sidebar):
 
-- Default endpoint is `https://api.cobalt.tools`, which is bot-protected and
-  currently **cannot download from YouTube** — you will see an auth error.
+- Default endpoint is `http://localhost:4940` — the bundled
+  [yt-dlp sidecar](yt-dlp-sidecar/), which speaks cobalt's API shape (cobalt
+  itself is blocked by YouTube's SABR rollout for long-form videos,
+  [imputnet/cobalt#1455](https://github.com/imputnet/cobalt/issues/1455)).
+  Run it in Docker:
+
+  ```bash
+  docker build -t yt-dlp-sidecar ./yt-dlp-sidecar
+  docker run -d --name yt-dlp-sidecar -p 4940:4940 --restart unless-stopped yt-dlp-sidecar
+  ```
+
 - Public no-auth instances with working YouTube access are rare (see
-  [cobalt discussion #860](https://github.com/imputnet/cobalt/discussions/860));
-  point the instance URL at one you trust, or self-host:
+  [cobalt discussion #860](https://github.com/imputnet/cobalt/discussions/860)),
+  and `https://api.cobalt.tools` is bot-protected and returns auth errors.
+  If you'd rather self-host cobalt:
 
   ```bash
   docker run -p 4939:4939 ghcr.io/imput/cobalt-api

@@ -111,10 +111,17 @@ export async function fetchYouTubeAudio(url: string, endpoint: string): Promise<
   }
 
   let payload: CobaltSuccess | CobaltError;
+  const raw = await response.text().catch(() => '');
   try {
-    payload = await response.json();
+    payload = JSON.parse(raw) as CobaltSuccess | CobaltError;
   } catch {
-    throw new Error(`The cobalt instance returned an invalid response (HTTP ${response.status}).`);
+    const type = response.headers.get('content-type') ?? 'unknown content-type';
+    const snippet = raw.replace(/\s+/g, ' ').trim().slice(0, 120);
+    throw new Error(
+      `The cobalt instance returned an invalid response (HTTP ${response.status}, ${type}`
+        + (snippet ? `: "${snippet}"` : '')
+        + '). Is the Instance URL pointing at a cobalt API endpoint rather than a web page?',
+    );
   }
 
   if (payload.status === 'error') {
