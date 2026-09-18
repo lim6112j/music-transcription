@@ -21,13 +21,16 @@ function beatsToEvents(specs: Array<[number, number, number]>): NoteEvent[] {
 function shortVoiceMeasures(score: BuiltScore, beatsPerMeasure: number): string[] {
   const bad: string[] = [];
   score.measures.forEach((items: MeasureItem[], mi) => {
-    const sums = new Map<number, number>();
-    for (const it of items) sums.set(it.voice, (sums.get(it.voice) ?? 0) + it.beats);
+    const sums = new Map<string, number>();
+    for (const it of items) {
+      const key = `${it.hand}:${it.layer}`;
+      sums.set(key, (sums.get(key) ?? 0) + it.beats);
+    }
     for (const [voice, sum] of sums) {
       if (Math.abs(sum - beatsPerMeasure) > EPS) {
         bad.push(
           `m${mi + 1}v${voice}=${sum.toFixed(4)} [${items
-            .filter((i) => i.voice === voice)
+            .filter((i) => `${i.hand}:${i.layer}` === voice)
             .map((i) => `${i.duration}${i.isRest ? 'r' : ''}${i.tuplet ? 't' : ''}@${i.beats}`)
             .join(' ')}]`,
         );
@@ -199,4 +202,85 @@ test('a real triplet still renders as tuplets', () => {
     `expected triplet 8ths, got ${firstVoice.map((i) => `${i.duration}${i.tuplet ? 't' : ''}`).join(' ')}`,
   );
   assert.deepEqual(shortVoiceMeasures(score, 4), []);
+});
+
+test('bass and melody notes land in separate hands (grand staff)', () => {
+  const score = buildScore(
+    beatsToEvents([
+      [0, 2, 45],
+      [0, 2, 72],
+      [2, 2, 48],
+      [2, 2, 74],
+    ]),
+    { tempo: 120, beatsPerMeasure: 4, clef: 'auto', keySpec: 'C' },
+  );
+  const hands = new Set(score.measures.flat().map((i) => i.hand));
+  assert.deepEqual([...hands].sort(), [0, 1]);
+  // each hand's measure sums to a full 4 beats
+  assert.deepEqual(shortVoiceMeasures(score, 4), []);
+});
+
+test('a sustained note is trimmed to the next onset and emits a pedal span', () => {
+  const score = buildScore(
+    beatsToEvents([
+      [0, 6, 72], // held far past the next attack — pedal resonance
+      [1, 1, 74],
+      [2, 1, 76],
+      [3, 1, 77],
+    ]),
+    { tempo: 120, beatsPerMeasure: 4, clef: 'auto', keySpec: 'C' },
+  );
+  const first = score.measures[0].find((i) => !i.isRest)!;
+  assert.equal(first.duration, 'q'); // written as one beat, not tied
+  assert.equal(first.tieToNext, false);
+  assert.ok(score.pedals.length > 0, 'expected a heuristic pedal span');
+  assert.equal(score.pedals[0].startBeat, 0);
+});
+
+test('a deliberately held final chord keeps its length with no pedal span', () => {
+  const score = buildScore(
+    beatsToEvents([
+      [0, 4, 72],
+    ]),
+    { tempo: 120, beatsPerMeasure: 4, clef: 'auto', keySpec: 'C' },
+  );
+  const note = score.measures[0].find((i) => !i.isRest)!;
+  assert.equal(note.duration, 'w');
+  assert.deepEqual(score.pedals, []);
+});
+
+test('an isolated off-grid duration snaps straight instead of faking a triplet', () => {
+  const score = buildScore(
+    beatsToEvents([
+      [0, 0.25, 72],
+      [0.25, 0.25, 74],
+      [0.5, 1 / 3, 76], // rubato-ish odd duration, no triplet neighbours
+      [2, 2, 77],
+    ]),
+    { tempo: 120, beatsPerMeasure: 4, clef: 'auto', keySpec: 'C' },
+  );
+  const tuplets = score.measures[0].filter((i) => i.tuplet);
+  assert.deepEqual(tuplets, [], 'no tuplet items should exist without triplet evidence');
+  assert.deepEqual(shortVoiceMeasures(score, 4), []);
+});
+
+test('dynamics mark the opening level and later changes only', () => {
+  const specs: Array<[number, number, number]> = [];
+  // quiet first half, loud second half
+  for (let i = 0; i < 16; i++) specs.push([i * 0.5, 0.45, 72 + (i % 5)]);
+  for (let i = 0; i < 16; i++) specs.push([8 + i * 0.5, 0.45, 84 + (i % 5)]);
+  const events = specs.map((s) => ({
+    ...beatsToEvents([s])[0],
+    amplitude: s[0] < 8 ? 0.3 : 0.9,
+  }));
+  const score = buildScore(events, {
+    tempo: 120,
+    beatsPerMeasure: 4,
+    clef: 'auto',
+    keySpec: 'C',
+  });
+  assert.ok(score.dynamics.length >= 2, `expected a dynamic change, got ${JSON.stringify(score.dynamics)}`);
+  assert.equal(score.dynamics[0].measure, 0);
+  // the first half is the quiet level, the change lands in the loud half
+  assert.ok(score.dynamics[0].mark !== score.dynamics[score.dynamics.length - 1].mark);
 });

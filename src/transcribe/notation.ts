@@ -1,11 +1,16 @@
 import type { NoteEvent } from './transcribe';
+import { handOf, handSplitPoint, type Hand } from './hands.ts';
+import { trimSustain } from './sustain.ts';
+import { keySignatureMap, keysToMidi, preferFlatsFor, spellMidi } from './spelling.ts';
 
 export interface MeasureItem {
   keys: string[]; // VexFlow pitch specs, e.g. ['c/4', 'e/4']
   duration: string; // VexFlow duration code incl. rests, e.g. 'q', 'hd', 'qr'
   isRest: boolean;
-  voice: number; // voice layer this item belongs to (0 = primary)
-  accidentals: Array<string | null>; // per-key accidental symbol or null
+  hand: Hand; // which staff this item renders on (0 = treble, 1 = bass)
+  layer: 0 | 1; // voice layer within the hand (two-voice staves)
+  onsetBeat: number; // absolute score position in beats, for pedal/dynamics
+  accidentals: Array<string | null>; // per-key accidental glyph or null
   tieToNext: boolean;
   tieFromPrev: boolean;
   beats: number; // actual duration in beats (differs from nominal for tuplets)
@@ -17,12 +22,27 @@ export interface ScoreSettings {
   beatsPerMeasure: number; // e.g. 4 for 4/4
   clef: 'auto' | 'treble' | 'bass';
   keySpec: string; // VexFlow key signature spec, e.g. 'C', 'G', 'Bb', 'Am'
+  title?: string; // source-derived score title for the header block
+}
+
+export interface PedalSpan {
+  startBeat: number;
+  endBeat: number;
+}
+
+export type DynamicMark = 'p' | 'mp' | 'mf' | 'f';
+
+export interface DynamicChange {
+  measure: number; // measure index where the new level starts
+  mark: DynamicMark;
 }
 
 export interface BuiltScore {
   measures: MeasureItem[][];
   settings: ScoreSettings;
   totalMeasures: number;
+  pedals: PedalSpan[]; // heuristic sustain-pedal spans (score beats)
+  dynamics: DynamicChange[]; // where the dynamic level changes
 }
 
 const DUR_BEATS: Array<[number, string]> = [
@@ -40,7 +60,7 @@ const QUANTUM = 1 / 12; // grid unit: 1/12 beat covers straight 16ths (3 units) 
 const CHORD_MERGE_BEATS = 0.125; // onsets closer than this merge into one chord
 const EPS = 1e-6;
 const MAX_MEASURES = 400;
-const MAX_VOICES = 2; // single-stave engraving limit; excess layers clip instead of stack
+const MAX_LAYERS = 2; // voice layers per hand; excess layers clip instead of stack
 
 export function beatsOf(duration: string): number {
   const base = duration.replace('r', '');
@@ -70,6 +90,10 @@ const VOCAB: Array<{ twelfths: number; rep: DurationRep }> = [
   { twelfths: 4, rep: { code: '8', beats: 1 / 3, tuplet: true } },
   { twelfths: 2, rep: { code: '16', beats: 1 / 6, tuplet: true } },
 ];
+const STRAIGHT_VOCAB = VOCAB.filter((v) => !v.rep.tuplet);
+
+// spacings (in twelfths) only a tuplet grid produces — evidence for triplets
+const TRIPLET_IOI_TWELFTHS = new Set([2, 4, 8]);
 
 const MIN_BLOCK_TWELFTHS = 2; // nothing notatable is shorter than a triplet 16th
 
@@ -275,78 +299,6 @@ export function pickMeasuresPerRow(itemCounts: number[]): number {
   return 4;
 }
 
-// ---------- Pitch / key signature helpers ----------
-
-const PITCH_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
-const BASE_PC: Record<string, number> = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
-const SHARP_ORDER = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
-const FLAT_ORDER = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
-
-// every key-name spelling the app can produce (KEY_OPTIONS + estimateKeySpec),
-// including enharmonics PC_NAMES lacks ('Db', 'G#')
-const PC_LOOKUP: Record<string, number> = {
-  C: 0,
-  'C#': 1,
-  Db: 1,
-  D: 2,
-  'D#': 3,
-  Eb: 3,
-  E: 4,
-  F: 5,
-  'F#': 6,
-  Gb: 6,
-  G: 7,
-  'G#': 8,
-  Ab: 8,
-  A: 9,
-  'A#': 10,
-  Bb: 10,
-  B: 11,
-  Cb: 11,
-};
-
-// accidental count per major-key tonic pitch class
-const SHARPS_BY_PC: Record<number, number> = { 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: 7 };
-const FLATS_BY_PC: Record<number, number> = { 5: 1, 10: 2, 3: 3, 8: 4, 1: 5, 6: 6, 11: 7 };
-// major tonics whose standard spelling is flat and unambiguous (F, Bb, Eb, Ab)
-const FLAT_MAJORS = new Set([5, 10, 3, 8]);
-
-function keySignatureMap(keySpec: string): Record<string, '#' | 'b' | ''> {
-  const map: Record<string, '#' | 'b' | ''> = { c: '', d: '', e: '', f: '', g: '', a: '', b: '' };
-  const isMinor = keySpec.length > 1 && keySpec.endsWith('m');
-  const root = isMinor ? keySpec.slice(0, -1) : keySpec;
-  const pc = PC_LOOKUP[root];
-  if (pc === undefined) return map;
-  const majorPc = isMinor ? (pc + 3) % 12 : pc; // minor keys use their relative major's signature
-  // the root's own spelling decides between enharmonic key signatures
-  // (C# major = 7 sharps, Db major = 5 flats)
-  const preferFlats = root.includes('b') || (!root.includes('#') && FLAT_MAJORS.has(majorPc));
-  const count = preferFlats ? FLATS_BY_PC[majorPc] : (SHARPS_BY_PC[majorPc] ?? FLATS_BY_PC[majorPc]);
-  const order = preferFlats ? FLAT_ORDER : SHARP_ORDER;
-  const symbol: '#' | 'b' = preferFlats ? 'b' : '#';
-  for (let i = 0; i < (count ?? 0); i++) map[order[i]] = symbol;
-  return map;
-}
-
-function midiToKeySpec(midi: number): string {
-  const name = PITCH_NAMES[((midi % 12) + 12) % 12];
-  const octave = Math.floor(midi / 12) - 1;
-  return `${name}/${octave}`;
-}
-
-function accidentalFor(midi: number, keyMap: Record<string, '#' | 'b' | ''>): string | null {
-  const pc = ((midi % 12) + 12) % 12;
-  const name = PITCH_NAMES[pc];
-  const letter = name[0];
-  const keyAcc = keyMap[letter];
-  const hasAccidentalInName = name.length > 1;
-  const noteAcc = hasAccidentalInName ? (name[1] === '#' ? '#' : 'b') : '';
-  if (noteAcc === keyAcc) return null; // matches what the key signature provides
-  if (!hasAccidentalInName && keyAcc === '') return null;
-  if (!hasAccidentalInName && keyAcc !== '') return 'n'; // natural cancels the key signature
-  return noteAcc;
-}
-
 // ---------- Segmentation ----------
 
 /**
@@ -354,60 +306,99 @@ function accidentalFor(midi: number, keyMap: Record<string, '#' | 'b' | ''>): st
  * position `startTw` into notatable segments. Respects measure boundaries
  * (pieces never cross a barline) and prefers stopping at the middle of a
  * measure, falling back to a crossing piece only when stopping there would
- * strand an unnotatable remainder. Returns null for spans no combination can
- * express — callers tile the timeline so every span is ≥ 2 twelfths.
+ * strand an unnotatable remainder. Triplet pieces are only used inside
+ * `zones` (where the onsets show real triplet evidence); a span the gated
+ * vocabulary cannot express falls back to the full vocabulary. Returns null
+ * for spans no combination can express — callers tile the timeline so every
+ * span is ≥ 2 twelfths.
  */
 function decomposeSpan(
   startTw: number,
   lenTw: number,
   beatsPerMeasure: number,
+  zones: Array<[number, number]>,
 ): Array<{ start: number; rep: DurationRep }> | null {
   const perMeasure = beatsPerMeasure * 12;
-  const memo = new Map<string, number | null>();
-  // largest notatable piece at posTw with remTw left, 0 = done, null = stuck
-  const firstPiece = (posTw: number, remTw: number): number | null => {
-    if (remTw === 0) return 0;
-    const key = `${posTw}:${remTw}`;
-    const cached = memo.get(key);
-    if (cached !== undefined) return cached;
-    const into = posTw % perMeasure;
-    const toBarline = perMeasure - into;
-    const toHalf = into !== 0 && into * 2 < perMeasure ? perMeasure / 2 - into : toBarline;
-    let out: number | null = null;
-    for (const { twelfths } of VOCAB) {
-      if (twelfths > remTw || twelfths > toBarline || twelfths > toHalf) continue;
-      if (firstPiece(posTw + twelfths, remTw - twelfths) !== null) {
-        out = twelfths;
-        break;
-      }
-    }
-    if (out === null && toHalf < toBarline) {
-      // the mid-measure split point is unreachable from here — let one
-      // piece cross it instead of leaving the rest of the measure blank
-      for (const { twelfths } of VOCAB) {
-        if (twelfths > remTw || twelfths > toBarline) continue;
+
+  const attempt = (zoneList: Array<[number, number]> | null): Array<{ start: number; rep: DurationRep }> | null => {
+    const memo = new Map<string, number | null>();
+    // triplet pieces need onset evidence — null zones disables the gate
+    const vocabAt = (posTw: number) =>
+      zoneList === null || zoneList.some(([a, b]) => posTw >= a && posTw < b) ? VOCAB : STRAIGHT_VOCAB;
+    // largest notatable piece at posTw with remTw left, 0 = done, null = stuck
+    const firstPiece = (posTw: number, remTw: number): number | null => {
+      if (remTw === 0) return 0;
+      const key = `${posTw}:${remTw}`;
+      const cached = memo.get(key);
+      if (cached !== undefined) return cached;
+      const into = posTw % perMeasure;
+      const toBarline = perMeasure - into;
+      const toHalf = into !== 0 && into * 2 < perMeasure ? perMeasure / 2 - into : toBarline;
+      let out: number | null = null;
+      for (const { twelfths } of vocabAt(posTw)) {
+        if (twelfths > remTw || twelfths > toBarline || twelfths > toHalf) continue;
         if (firstPiece(posTw + twelfths, remTw - twelfths) !== null) {
           out = twelfths;
           break;
         }
       }
+      if (out === null && toHalf < toBarline) {
+        // the mid-measure split point is unreachable from here — let one
+        // piece cross it instead of leaving the rest of the measure blank
+        for (const { twelfths } of vocabAt(posTw)) {
+          if (twelfths > remTw || twelfths > toBarline) continue;
+          if (firstPiece(posTw + twelfths, remTw - twelfths) !== null) {
+            out = twelfths;
+            break;
+          }
+        }
+      }
+      memo.set(key, out);
+      return out;
+    };
+
+    const segments: Array<{ start: number; rep: DurationRep }> = [];
+    let posTw = startTw;
+    let remaining = lenTw;
+    while (remaining > 0) {
+      const piece = firstPiece(posTw, remaining);
+      if (piece === null || piece === 0) return null;
+      const rep = VOCAB.find((v) => v.twelfths === piece)!.rep;
+      segments.push({ start: posTw / 12, rep });
+      posTw += piece;
+      remaining -= piece;
     }
-    memo.set(key, out);
-    return out;
+    return segments;
   };
 
-  const segments: Array<{ start: number; rep: DurationRep }> = [];
-  let posTw = startTw;
-  let remaining = lenTw;
-  while (remaining > 0) {
-    const piece = firstPiece(posTw, remaining);
-    if (piece === null || piece === 0) return null;
-    const rep = VOCAB.find((v) => v.twelfths === piece)!.rep;
-    segments.push({ start: posTw / 12, rep });
-    posTw += piece;
-    remaining -= piece;
+  return attempt(zones) ?? attempt(null);
+}
+
+/**
+ * Find time ranges where a voice's onsets show real triplet evidence: runs of
+ * ≥ 3 onsets spaced at equal IOIs that only a tuplet grid produces (2, 4 or 8
+ * twelfths). Returned in twelfths as [start, end) ranges.
+ */
+function tripletZones(gs: Array<{ start: number }>): Array<[number, number]> {
+  const onsets = [...new Set(gs.map((g) => Math.round(g.start * 12)))].sort((a, b) => a - b);
+  const zones: Array<[number, number]> = [];
+  let runStart = 0;
+  let runIoi = 0;
+  let runIoIs = 0;
+  for (let i = 1; i < onsets.length; i++) {
+    const ioi = onsets[i] - onsets[i - 1];
+    const isTriplet = TRIPLET_IOI_TWELFTHS.has(ioi);
+    if (isTriplet && ioi === runIoi) {
+      runIoIs += 1;
+    } else {
+      if (runIoIs >= 2) zones.push([runStart, onsets[i - 1] + runIoi]);
+      runStart = onsets[i - 1];
+      runIoi = ioi;
+      runIoIs = isTriplet ? 1 : 0;
+    }
   }
-  return segments;
+  if (runIoIs >= 2) zones.push([runStart, onsets[onsets.length - 1] + runIoi]);
+  return zones;
 }
 
 function measureIndexOf(start: number, beatsPerMeasure: number): number {
@@ -418,6 +409,8 @@ interface OnsetGroup {
   start: number;
   end: number;
   pitches: number[];
+  hand: Hand;
+  amplitude: number; // strongest member, for dynamics
 }
 
 // a contiguous run of the timeline sounding either notes or rest; twelfths
@@ -428,13 +421,13 @@ interface TimelineBlock {
 }
 
 /**
- * Tile one voice's timeline [0, scoreEndTw) with note/rest blocks. Quantized
- * onsets can leave 1/12-beat slivers the duration vocabulary cannot express,
- * so each sliver is absorbed into a neighbouring block: after a block
- * (sustain or longer rest), before the score end (shorter trailing rest), or
- * — when there is no neighbour at all — by pulling the onset itself. Blocks
- * therefore tile the timeline exactly and are all ≥ 2 twelfths, which is
- * what guarantees every measure fills to the barline.
+ * Tile one voice layer's timeline [0, scoreEndTw) with note/rest blocks.
+ * Quantized onsets can leave 1/12-beat slivers the duration vocabulary cannot
+ * express, so each sliver is absorbed into a neighbouring block: after a
+ * block (sustain or longer rest), before the score end (shorter trailing
+ * rest), or — when there is no neighbour at all — by pulling the onset
+ * itself. Blocks therefore tile the timeline exactly and are all ≥ 2
+ * twelfths, which is what guarantees every measure fills to the barline.
  */
 function tileVoice(gs: OnsetGroup[], scoreEndTw: number, beatsPerMeasure: number): TimelineBlock[] {
   const perMeasure = beatsPerMeasure * 12;
@@ -501,18 +494,22 @@ function tileVoice(gs: OnsetGroup[], scoreEndTw: number, beatsPerMeasure: number
 function makeItems(
   block: TimelineBlock,
   segments: Array<{ start: number; rep: DurationRep }>,
-  keyMap: Record<string, '#' | 'b' | ''>,
-  voice: number,
+  spell: (midi: number) => { key: string; accidental: string | null },
+  hand: Hand,
+  layer: 0 | 1,
+  restKey: string,
 ): MeasureItem[] {
-  const keys = block.pitches === null ? ['b/4'] : block.pitches.map(midiToKeySpec);
+  const spelled = block.pitches === null ? [] : block.pitches.map(spell);
   const isRest = block.pitches === null;
   return segments.map((seg, i) => {
     return {
-      keys: isRest ? ['b/4'] : keys,
+      keys: isRest ? [restKey] : spelled.map((s) => s.key),
       duration: isRest ? `${seg.rep.code}r` : seg.rep.code,
       isRest,
-      voice,
-      accidentals: isRest ? [] : keys.map((_, k) => accidentalFor(keysToMidi(keys[k]), keyMap)),
+      hand,
+      layer,
+      onsetBeat: seg.start,
+      accidentals: isRest ? [] : spelled.map((s) => s.accidental),
       // a chain longer than one segment means its parts are tied together
       tieToNext: !isRest && i < segments.length - 1,
       tieFromPrev: !isRest && i > 0,
@@ -520,13 +517,6 @@ function makeItems(
       tuplet: seg.rep.tuplet,
     };
   });
-}
-
-export function keysToMidi(key: string): number {
-  // reverse of midiToKeySpec
-  const [name, oct] = key.split('/');
-  const base = BASE_PC[name[0]] ?? 0;
-  return base + (name.length > 1 ? (name[1] === '#' ? 1 : -1) : 0) + (parseInt(oct, 10) + 1) * 12;
 }
 
 /**
@@ -537,15 +527,92 @@ function appendItems(
   measures: MeasureItem[][],
   block: TimelineBlock,
   segments: Array<{ start: number; rep: DurationRep }>,
-  keyMap: Record<string, '#' | 'b' | ''>,
-  voice: number,
+  spell: (midi: number) => { key: string; accidental: string | null },
+  hand: Hand,
+  layer: 0 | 1,
+  restKey: string,
   beatsPerMeasure: number,
 ): void {
-  const items = makeItems(block, segments, keyMap, voice);
+  const items = makeItems(block, segments, spell, hand, layer, restKey);
   segments.forEach((seg, i) => {
     const mi = measureIndexOf(seg.start, beatsPerMeasure);
     if (mi >= 0 && mi < measures.length) measures[mi].push(items[i]);
   });
+}
+
+/**
+ * Assign chord groups to voice layers so no layer ever overlaps itself.
+ * Each hand is layered independently (up to MAX_LAYERS per hand), so a held
+ * bass note never pushes right-hand material around. Overlapping material
+ * becomes a second layer; a third clips the earliest-busy layer's tail.
+ */
+function layerGroups(groups: OnsetGroup[]): Array<OnsetGroup & { layer: 0 | 1 }> {
+  const out = groups.map((g) => ({ ...g, layer: 0 as 0 | 1 }));
+  for (const hand of [0, 1] as Hand[]) {
+    const handGroups = out.filter((g) => g.hand === hand); // start-sorted
+    const layerEnds: number[] = [];
+    const lastInLayer: Array<OnsetGroup & { layer: 0 | 1 }> = [];
+    for (const g of handGroups) {
+      let li = layerEnds.findIndex((end) => end <= g.start + EPS);
+      if (li < 0) {
+        if (layerEnds.length < MAX_LAYERS) {
+          li = layerEnds.length;
+          layerEnds.push(0);
+        } else {
+          // both layers busy: reuse the one freeing up soonest, clipping the
+          // tail of the note that occupies it (only the last group in a layer
+          // can extend past g.start)
+          li = layerEnds.indexOf(Math.min(...layerEnds));
+          const prev = lastInLayer[li];
+          if (prev && prev.end > g.start) prev.end = Math.max(prev.start + QUANTUM, g.start);
+        }
+      }
+      g.layer = li as 0 | 1;
+      layerEnds[li] = Math.max(layerEnds[li], g.end);
+      lastInLayer[li] = g;
+    }
+  }
+  return out;
+}
+
+// ---------- Dynamics ----------
+
+// mean amplitude relative to the piece's median, mapped to a written mark
+const DYNAMIC_RATIOS: Array<[number, DynamicMark]> = [
+  [0.7, 'p'],
+  [0.95, 'mp'],
+  [1.25, 'mf'],
+  [Infinity, 'f'],
+];
+
+function computeDynamics(
+  groups: Array<OnsetGroup & { layer: 0 | 1 }>,
+  totalMeasures: number,
+  beatsPerMeasure: number,
+): DynamicChange[] {
+  const amplitudes = groups.map((g) => g.amplitude).sort((a, b) => a - b);
+  const median = amplitudes.length > 0 ? amplitudes[Math.floor(amplitudes.length / 2)] : 0;
+  if (median <= 0) return [];
+  const sums = new Array<number>(totalMeasures).fill(0);
+  const weights = new Array<number>(totalMeasures).fill(0);
+  for (const g of groups) {
+    const mi = Math.min(totalMeasures - 1, Math.max(0, measureIndexOf(g.start, beatsPerMeasure)));
+    const weight = Math.max(QUANTUM, g.end - g.start);
+    sums[mi] += g.amplitude * weight;
+    weights[mi] += weight;
+  }
+  const changes: DynamicChange[] = [];
+  let prev: DynamicMark | null = null;
+  for (let mi = 0; mi < totalMeasures; mi++) {
+    if (weights[mi] === 0) continue;
+    const mean = sums[mi] / weights[mi];
+    const mark = DYNAMIC_RATIOS.find(([ratio]) => mean / median < ratio)![1];
+    if (mark !== prev) {
+      changes.push({ measure: mi, mark });
+      prev = mark;
+    }
+  }
+  return changes;
 }
 
 // ---------- Main builder ----------
@@ -554,89 +621,125 @@ export function buildScore(events: NoteEvent[], settings: ScoreSettings): BuiltS
   const { tempo, beatsPerMeasure } = settings;
   const toBeat = (s: number) => (s * tempo) / 60;
   const keyMap = keySignatureMap(settings.keySpec);
+  const preferFlats = preferFlatsFor(settings.keySpec);
+  const spell = (midi: number) => spellMidi(midi, keyMap, preferFlats);
 
-  // 1. Quantize onsets and durations to the sixteenth-note grid
+  // 1. Quantize onsets and durations to the 1/12-beat grid, split hands by
+  // register (one consistent split point for the whole piece)
+  const split = handSplitPoint(events);
   const quantized = events.map((e) => ({
     pitchMidi: e.pitchMidi,
     start: Math.max(0, Math.round(toBeat(e.startTimeSeconds) / QUANTUM) * QUANTUM),
     dur: Math.max(QUANTUM, Math.round(toBeat(e.durationSeconds) / QUANTUM) * QUANTUM),
+    amplitude: e.amplitude,
+    hand: handOf(e.pitchMidi, split),
   }));
   quantized.sort((a, b) => a.start - b.start || a.pitchMidi - b.pitchMidi);
 
-  // 2. Group near-simultaneous notes into chords
+  // Triplet zones per hand, from the quantized onsets (onsets never move
+  // after this). Outside a zone, durations snap to the straight grid so
+  // rubato timing stops rendering as fake tuplets.
+  const zonesByHand = new Map<Hand, Array<[number, number]>>();
+  for (const hand of [0, 1] as Hand[]) {
+    zonesByHand.set(hand, tripletZones(quantized.filter((q) => q.hand === hand)));
+  }
+  const inZone = (hand: Hand, startTw: number) =>
+    zonesByHand.get(hand)!.some(([a, b]) => startTw >= a && startTw < b);
+  const snapped = quantized.map((q) => {
+    if (inZone(q.hand, Math.round(q.start * 12))) return q;
+    const durTw = Math.round(q.dur * 12);
+    return { ...q, dur: Math.max(3, Math.round(durTw / 3) * 3) / 12 };
+  });
+
+  // 2. Group near-simultaneous notes of ONE hand into chords — the hands
+  // never share a chord group, so each lands on its own staff
   const groups: OnsetGroup[] = [];
-  for (const q of quantized) {
+  for (const q of snapped) {
     const last = groups[groups.length - 1];
-    if (last && q.start - last.start < CHORD_MERGE_BEATS + EPS) {
+    if (last && last.hand === q.hand && q.start - last.start < CHORD_MERGE_BEATS + EPS) {
       last.end = Math.max(last.end, q.start + q.dur);
+      last.amplitude = Math.max(last.amplitude, q.amplitude);
       if (!last.pitches.includes(q.pitchMidi)) last.pitches.push(q.pitchMidi);
     } else {
-      groups.push({ start: q.start, end: q.start + q.dur, pitches: [q.pitchMidi] });
+      groups.push({
+        start: q.start,
+        end: q.start + q.dur,
+        pitches: [q.pitchMidi],
+        hand: q.hand,
+        amplitude: q.amplitude,
+      });
     }
   }
   for (const g of groups) g.pitches.sort((a, b) => a - b);
 
-  // 3. Assign chord groups to voices so no voice ever overlaps itself.
-  // Overlapping material (e.g. a held bass note under a melody) becomes a
-  // second voice; a third layer clips the earliest-busy voice's tail
-  // instead of spawning an unreadable stack of voices on one stave.
-  const voiceEnds: number[] = [];
-  const voices: OnsetGroup[][] = [];
-  for (const g of groups) {
-    let vi = voiceEnds.findIndex((end) => end <= g.start + EPS);
-    if (vi < 0) {
-      if (voices.length < MAX_VOICES) {
-        vi = voiceEnds.length;
-        voiceEnds.push(0);
-        voices.push([]);
-      } else {
-        // both voices busy: reuse the one freeing up soonest, clipping the
-        // tail of the note that occupies it (invariant: only the last group
-        // in a voice can extend past g.start)
-        vi = voiceEnds.indexOf(Math.min(...voiceEnds));
-        const prev = voices[vi][voices[vi].length - 1];
-        if (prev && prev.end > g.start) prev.end = Math.max(prev.start + QUANTUM, g.start);
-      }
-    }
-    voices[vi].push(g);
-    voiceEnds[vi] = Math.max(voiceEnds[vi], g.end);
-  }
-  if (voices.length === 0) voices.push([]);
+  // 3. Layer each hand independently, then trim pedal-sustained durations
+  // into clean rhythmic values, collecting heuristic pedal spans
+  const layered = layerGroups(groups);
+  const { groups: trimmed, pedals } = trimSustain(layered);
+
+  const grand = trimmed.some((g) => g.hand === 1);
+  // rests sit on the middle line of the staff they render on
+  const restKeyFor = (hand: Hand) => (grand ? hand === 1 : settings.clef === 'bass') ? 'd/3' : 'b/4';
 
   // 4. Total measures needed
-  const lastEnd = voices.reduce(
-    (max, gs) => (gs.length > 0 ? Math.max(max, gs[gs.length - 1].end) : max),
-    beatsPerMeasure,
-  );
+  const lastEnd = trimmed.reduce((max, g) => Math.max(max, g.end), beatsPerMeasure);
   const totalMeasures = Math.min(MAX_MEASURES, Math.max(1, Math.ceil(lastEnd / beatsPerMeasure - EPS)));
-
-  // 5. Tile each voice's timeline with note/rest blocks, then decompose the
-  // blocks into notatable segments; tiling guarantees exact measure fills
-  const measures: MeasureItem[][] = Array.from({ length: totalMeasures }, () => []);
   const scoreEndTw = totalMeasures * beatsPerMeasure * 12;
-  voices.forEach((gs, voice) => {
-    for (const block of tileVoice(gs, scoreEndTw, beatsPerMeasure)) {
-      const segments = decomposeSpan(block.startTw, block.endTw - block.startTw, beatsPerMeasure);
-      if (!segments) continue; // unreachable: tiling yields blocks ≥ 2 twelfths
-      appendItems(measures, block, segments, keyMap, voice, beatsPerMeasure);
-    }
-  });
+  const scoreEndBeat = totalMeasures * beatsPerMeasure;
 
-  // 6. Clamp overflow inside each measure per voice (rounding safety)
+  // 5. Tile each (hand, layer) timeline with note/rest blocks, then
+  // decompose into notatable segments; tiling guarantees exact measure fills
+  const measures: MeasureItem[][] = Array.from({ length: totalMeasures }, () => []);
+  const layerKeys: Array<{ hand: Hand; layer: 0 | 1 }> = [];
+  for (const g of trimmed) {
+    if (!layerKeys.some((k) => k.hand === g.hand && k.layer === g.layer)) {
+      layerKeys.push({ hand: g.hand, layer: g.layer });
+    }
+  }
+  layerKeys.sort((a, b) => a.hand - b.hand || a.layer - b.layer);
+  for (const { hand, layer } of layerKeys) {
+    const gs = trimmed.filter((g) => g.hand === hand && g.layer === layer);
+    const zones = zonesByHand.get(hand)!;
+    // a voice layer stops at the end of the measure containing its last
+    // note — trailing measures must not fill up with whole rests
+    const layerEndTw = Math.min(
+      scoreEndTw,
+      Math.ceil(Math.max(...gs.map((g) => g.end)) / beatsPerMeasure - EPS) * beatsPerMeasure * 12,
+    );
+    for (const block of tileVoice(gs, layerEndTw, beatsPerMeasure)) {
+      const segments = decomposeSpan(block.startTw, block.endTw - block.startTw, beatsPerMeasure, zones);
+      if (!segments) continue; // unreachable: tiling yields blocks ≥ 2 twelfths
+      appendItems(measures, block, segments, spell, hand, layer, restKeyFor(hand), beatsPerMeasure);
+    }
+  }
+
+  // 6. Clamp overflow inside each measure per (hand, layer) — rounding safety
   for (let mi = 0; mi < measures.length; mi++) {
-    const sums = new Map<number, number>();
+    const sums = new Map<string, number>();
     measures[mi] = measures[mi].map((item) => {
-      const sum = sums.get(item.voice) ?? 0;
+      const key = `${item.hand}:${item.layer}`;
+      const sum = sums.get(key) ?? 0;
       if (sum + item.beats <= beatsPerMeasure + EPS) {
-        sums.set(item.voice, sum + item.beats);
+        sums.set(key, sum + item.beats);
         return item;
       }
       const rep = pickDuration(beatsPerMeasure - sum);
       if (!rep) return item; // no representable duration fits — leave as is
-      sums.set(item.voice, sum + rep.beats);
+      sums.set(key, sum + rep.beats);
       return { ...item, duration: item.isRest ? `${rep.code}r` : rep.code, beats: rep.beats, tuplet: rep.tuplet };
     });
   }
 
-  return { measures, settings, totalMeasures };
+  return {
+    measures,
+    settings,
+    totalMeasures,
+    pedals: pedals
+      .map((p) => ({ startBeat: p.startBeat, endBeat: Math.min(p.endBeat, scoreEndBeat) }))
+      .filter((p) => p.startBeat < scoreEndBeat),
+    dynamics: computeDynamics(trimmed, totalMeasures, beatsPerMeasure),
+  };
 }
+
+export { keysToMidi };
+

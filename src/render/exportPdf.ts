@@ -90,6 +90,13 @@ export async function exportScorePdf(container: HTMLElement, fileName: string): 
   const usableW = pageW - margin * 2;
 
   let y = margin;
+  let page = 1;
+  // page number, centered in the bottom margin
+  const stampPage = () => {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.text(String(page), pageW / 2, pageH - 18, { align: 'center' });
+  };
   for (const src of svgs) {
     // work on a clone so the on-screen score keeps its webfont rendering
     const svg = src.cloneNode(true) as SVGSVGElement;
@@ -99,7 +106,9 @@ export async function exportScorePdf(container: HTMLElement, fileName: string): 
     if (!w || !h) continue;
     const drawH = (h / w) * usableW;
     if (y + drawH > pageH - margin) {
+      stampPage();
       doc.addPage();
+      page += 1;
       y = margin;
     }
     // a row taller than the space left on the page is scaled down so it
@@ -122,5 +131,6 @@ export async function exportScorePdf(container: HTMLElement, fileName: string): 
     }
     y += drawH * fitScale + 12;
   }
+  stampPage();
   doc.save(fileName);
 }

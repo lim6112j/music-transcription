@@ -11,6 +11,7 @@ import {
 } from './audio/youtube';
 import { playScore, type PlaybackHandle } from './audio/playback';
 import { transcribeAudio, type NoteEvent } from './transcribe/transcribe';
+import { DEMO_EVENTS } from './transcribe/demo';
 import { filterNoiseEvents, type NoiseFilterLevel } from './transcribe/filter';
 import {
   buildScore,
@@ -22,6 +23,7 @@ import {
 } from './transcribe/notation';
 import { ScoreView, SCORE_SHEET_ID, loadSpacing, saveSpacing } from './render/ScoreView';
 import { exportScorePdf } from './render/exportPdf';
+import { buildScoreToMusicXml } from './render/exportMusicXml';
 
 type Status = 'idle' | 'fetching' | 'decoding' | 'analyzing' | 'ready';
 
@@ -73,8 +75,9 @@ export default function App() {
 
   const score: BuiltScore | null = useMemo(() => {
     if (!filteredEvents || filteredEvents.length === 0) return null;
-    return buildScore(filteredEvents, { tempo, beatsPerMeasure, clef, keySpec });
-  }, [filteredEvents, tempo, beatsPerMeasure, clef, keySpec]);
+    const title = (fileName ?? 'Untitled').replace(/\.[^.]+$/, '');
+    return buildScore(filteredEvents, { tempo, beatsPerMeasure, clef, keySpec, title });
+  }, [filteredEvents, tempo, beatsPerMeasure, clef, keySpec, fileName]);
 
   const busy = status === 'fetching' || status === 'decoding' || status === 'analyzing';
 
@@ -88,6 +91,18 @@ export default function App() {
     }
   }, [score]);
   useEffect(() => () => playbackRef.current?.stop(), []);
+
+  // dev aid: ?demo renders a synthetic two-hand score without the model
+  useEffect(() => {
+    if (noteEvents || !new URLSearchParams(window.location.search).has('demo')) return;
+    setNoteEvents(DEMO_EVENTS);
+    setFileName('demo-score.mid');
+    setTempo(120);
+    setKeySpec('Eb');
+    setClef('auto');
+    setStatus('ready');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!recording) return;
@@ -261,6 +276,23 @@ export default function App() {
     }
   }, [fileName, exporting]);
 
+  const handleExportMusicXml = useCallback(() => {
+    if (!score) return;
+    try {
+      const xml = buildScoreToMusicXml(score);
+      const blob = new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(fileName ?? 'score').replace(/\.[^.]+$/, '')}-score.musicxml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      setError('MusicXML export failed.');
+    }
+  }, [score, fileName]);
+
   const statusLabel =
     status === 'fetching'
       ? 'Fetching audio from YouTube…'
@@ -291,6 +323,9 @@ export default function App() {
           </button>
           <button className="btn primary" onClick={handleExportPdf} disabled={!score || exporting}>
             {exporting ? 'Exporting…' : 'Export PDF'}
+          </button>
+          <button className="btn" onClick={handleExportMusicXml} disabled={!score}>
+            MusicXML
           </button>
         </div>
       </header>

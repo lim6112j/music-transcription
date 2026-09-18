@@ -30,23 +30,24 @@ interface ScheduledNote {
 export function buildNoteSchedule(score: BuiltScore): ScheduledNote[] {
   const { measures, settings } = score;
   const notes: ScheduledNote[] = [];
-  const lastByVoice = new Map<number, ScheduledNote>();
+  const lastByVoice = new Map<string, ScheduledNote>();
 
   measures.forEach((items, mi) => {
-    // keep voices independent: walk each voice's items in order
-    const byVoice = new Map<number, typeof items>();
+    // keep voices independent: walk each (hand, layer) voice's items in order
+    const byVoice = new Map<string, typeof items>();
     for (const item of items) {
-      const list = byVoice.get(item.voice);
+      const key = `${item.hand}:${item.layer}`;
+      const list = byVoice.get(key);
       if (list) list.push(item);
-      else byVoice.set(item.voice, [item]);
+      else byVoice.set(key, [item]);
     }
-    for (const voiceItems of byVoice.values()) {
+    for (const [voiceKey, voiceItems] of byVoice) {
       let beat = mi * settings.beatsPerMeasure;
       for (const item of voiceItems) {
         // tuplet items sound shorter than their nominal duration code
         const beats = item.beats ?? beatsOf(item.duration);
         if (!item.isRest && item.keys.length > 0) {
-          const prev = notes.length > 0 ? lastByVoice.get(item.voice) : undefined;
+          const prev = notes.length > 0 ? lastByVoice.get(voiceKey) : undefined;
           const samePitch =
             prev &&
             item.tieFromPrev &&
@@ -61,7 +62,7 @@ export function buildNoteSchedule(score: BuiltScore): ScheduledNote[] {
               midis: item.keys.map(keysToMidi),
             };
             notes.push(note);
-            lastByVoice.set(item.voice, note);
+            lastByVoice.set(voiceKey, note);
           }
         }
         beat += beats;
